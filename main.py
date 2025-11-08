@@ -31,7 +31,7 @@ from .nai_api import NovelAIAPI, NovelAIAPIError
 from .parser import ParseError, ParsedParams, parse_generation_message
 from .queue_manager import RequestQueue
 
-DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nnai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n"""
+DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nnai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 负面词条预设（未填写“负面词条”时使用）\npreset_uc: "{preset_uc}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n"""
 
 
 @dataclass
@@ -42,6 +42,7 @@ class PluginConfig:
     image_save_path: str
     default_daily_limit: int
     admin_qq_list: list[str]
+    preset_uc: str
 
 
 def _load_yaml_config(path: Path) -> dict[str, Any]:
@@ -97,6 +98,7 @@ class NovelAIPlugin(Star):
             "image_save_path": str((self.plugin_dir / "outputs").resolve()),
             "default_daily_limit": 10,
             "admin_qq_list": [],
+            "preset_uc": "",
         }
         user_config = _load_yaml_config(self.config_path)
         merged = {**defaults, **user_config}
@@ -114,6 +116,7 @@ class NovelAIPlugin(Star):
             image_save_path=str(image_path),
             default_daily_limit=int(merged.get("default_daily_limit", 10)),
             admin_qq_list=[str(x) for x in merged.get("admin_qq_list", [])],
+            preset_uc=str(merged.get("preset_uc", "") or ""),
         )
 
     def _ensure_ready(self) -> Optional[str]:
@@ -555,8 +558,12 @@ class NovelAIPlugin(Star):
 
     def _ensure_default_files(self) -> None:
         output_dir = (self.plugin_dir / "outputs").resolve()
+        default_preset_uc = "lowres, bad anatomy, bad hands, worst quality, jpeg artifacts"
         if not self.config_path.exists():
-            content = DEFAULT_CONFIG_TEMPLATE.format(image_save_path=str(output_dir).replace("\\", "/"))
+            content = DEFAULT_CONFIG_TEMPLATE.format(
+                image_save_path=str(output_dir).replace("\\", "/"),
+                preset_uc=default_preset_uc,
+            )
             self.config_path.write_text(content, encoding="utf-8")
         if not self.whitelist_path.exists():
             default_whitelist = {"users": {}, "groups": {}}

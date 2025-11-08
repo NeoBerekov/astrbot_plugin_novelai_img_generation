@@ -136,6 +136,9 @@ def parse_generation_message(message: str) -> ParsedParams:
     if not message:
         raise ParseError("指令格式错误，缺少/nai开头")
 
+    # 统一替换中文逗号为英文逗号，避免参数分隔问题
+    message = message.replace("，", ",")
+
     stripped = message.strip()
     if not (stripped == "/nai" or stripped.startswith("/nai")):
         raise ParseError("指令格式错误，缺少/nai开头")

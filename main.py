@@ -624,6 +624,30 @@ class NovelAIPlugin(Star):
         async for result in self.whitelist_remove(event, target):
             yield result
 
+    @filter.command("naihelp")
+    async def nai_help(self, event: AstrMessageEvent):
+        template = (
+            "/nai 正面词条:<主要提示词，必填>\n"
+            "     负面词条:<不需要的内容；留空则使用配置 preset_uc>\n"
+            "     是否有福瑞:<是/否，默认否；是时会在提示词前添加 fur dataset>\n"
+            "     添加质量词:<是/否，默认否；关闭时若缺少 best quality/masterpiece 会自动追加配置 quality_words>\n"
+            "     底图:<图生图使用的图片编号，留空为文本生图>\n"
+            "     底图重绘强度:<0~1，默认0.7；越低越接近原图>\n"
+            "     底图加噪强度:<0~0.99，默认0；越高越接近文本描述>\n"
+            "     分辨率:<竖图/横图/方图，默认竖图>\n"
+            "     步数:<1~28 的整数，默认28>\n"
+            "     指导系数:<0~10 的数字，默认5>\n"
+            "     重采样系数:<0~1 的数字，默认0>\n"
+            "     种子:<整数，留空则随机>\n"
+            "     采样器:<k_euler/k_euler_ancestral/k_dpmpp_2m/...，默认 k_euler_ancestral>\n"
+            "     角色是否分区:<是/否；是时可指定角色位置，默认根据角色数判断>\n"
+            "     角色1正面词条:<角色提示词> 角色1负面词条:<角色负面词条> 角色1位置:<A1~E5>\n"
+            "     角色参考:<角色参考图编号> 角色参考强度:<0~1，默认1>\n"
+            "     是否注意原画风:<是/否，默认否>\n"
+            "     模型:<模型名称，留空使用配置 default_model>\n"
+        )
+        yield event.plain_result(template)
+
     def _init_nai_api(self):
         self._init_error = None
         try:

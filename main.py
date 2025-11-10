@@ -31,7 +31,7 @@ from .nai_api import NovelAIAPI, NovelAIAPIError
 from .parser import ParseError, ParsedParams, parse_generation_message
 from .queue_manager import RequestQueue
 
-DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nnai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 负面词条预设（未填写“负面词条”时使用）\npreset_uc: "{preset_uc}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n"""
+DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nnai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 负面词条预设（未填写“负面词条”时使用）\npreset_uc: "{preset_uc}"\n\n# 质量词，未检测到 best quality 与 masterpiece 时自动追加\nquality_words: "{quality_words}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n"""
 
 
 @dataclass
@@ -43,6 +43,15 @@ class PluginConfig:
     default_daily_limit: int
     admin_qq_list: list[str]
     preset_uc: str
+    quality_words: str
+
+
+@dataclass
+class PlatformProfile:
+    platform_name: str
+    access_control: AccessControl
+    whitelist_path: Path
+    use_group_whitelist: bool
 
 
 def _load_yaml_config(path: Path) -> dict[str, Any]:
@@ -73,10 +82,9 @@ class NovelAIPlugin(Star):
         self.config_dir = self.data_root / "config"
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.config_dir / "config.yaml"
-        self.whitelist_path = self.config_dir / "whitelist.json"
-        self._ensure_default_files()
+        self._ensure_default_config()
         self.config = self._load_config()
-        self.access_control = AccessControl(str(self.whitelist_path), self.config.default_daily_limit)
+        self.platform_profiles: dict[str, PlatformProfile] = {}
         self.nai_api: Optional[NovelAIAPI] = None
         self._init_error: Optional[str] = None
         self._init_nai_api()
@@ -99,6 +107,7 @@ class NovelAIPlugin(Star):
             "default_daily_limit": 10,
             "admin_qq_list": [],
             "preset_uc": "",
+            "quality_words": "best quality, masterpiece",
         }
         user_config = _load_yaml_config(self.config_path)
         merged = {**defaults, **user_config}
@@ -117,6 +126,7 @@ class NovelAIPlugin(Star):
             default_daily_limit=int(merged.get("default_daily_limit", 10)),
             admin_qq_list=[str(x) for x in merged.get("admin_qq_list", [])],
             preset_uc=str(merged.get("preset_uc", "") or ""),
+            quality_words=str(merged.get("quality_words", "") or ""),
         )
 
     def _ensure_ready(self) -> Optional[str]:
@@ -135,16 +145,20 @@ class NovelAIPlugin(Star):
             yield event.plain_result(error)
             return
 
+        profile = self._get_platform_profile(event)
+        access_control = profile.access_control
+
         is_group = self._is_group_message(event)
         group_id = event.get_group_id() if is_group else ""
 
-        if is_group:
-            if not self._bot_is_mentioned(event):
-                return
-            if not await self.access_control.check_group_permission(group_id):
+        if is_group and profile.use_group_whitelist:
+            if not await access_control.check_group_permission(group_id):
                 return
 
         command_text = self._extract_command_text(event)
+        if not command_text and event.get_platform_name().lower() == "discord":
+            command_text = self._extract_discord_command_text(event)
+
         if not command_text:
             if not is_group:
                 yield event.plain_result("未识别到指令")
@@ -153,8 +167,21 @@ class NovelAIPlugin(Star):
         try:
             parsed = parse_generation_message(command_text)
         except ParseError as exc:
-            yield event.plain_result(str(exc))
-            return
+            if event.get_platform_name().lower() == "discord" and hasattr(event.message_obj, "raw_message"):
+                raw = event.message_obj.raw_message
+                cleaned = self._extract_discord_command_text(event)
+                if cleaned:
+                    try:
+                        parsed = parse_generation_message(f"/nai {cleaned}")
+                    except ParseError:
+                        yield event.plain_result(str(exc))
+                        return
+                else:
+                    yield event.plain_result(str(exc))
+                    return
+            else:
+                yield event.plain_result(str(exc))
+                return
 
         model = parsed.model_name or self.config.default_model
         if model not in MODELS:
@@ -163,13 +190,13 @@ class NovelAIPlugin(Star):
             return
 
         user_id = event.get_sender_id()
-        user_allowed = await self.access_control.check_permission(user_id)
+        user_allowed = await access_control.check_permission(user_id)
         if not user_allowed:
             if not is_group:
                 yield event.plain_result("您不在白名单中")
             return
 
-        if not await self.access_control.check_quota(user_id):
+        if not await access_control.check_quota(user_id):
             if not is_group:
                 yield event.plain_result("每日限额已达")
             return
@@ -206,7 +233,10 @@ class NovelAIPlugin(Star):
             },
         )
 
-        yield event.plain_result("已加入生成队列，请稍候~")
+        hint = "已加入生成队列，请稍候~"
+        if parsed.auto_positive:
+            hint += " (未检测到‘正面词条’项，将全文作为提示词进行生图)"
+        yield event.plain_result(hint)
 
     async def _process_queue_item(self, item: dict[str, Any]):
         event: AstrMessageEvent = item["event"]
@@ -216,6 +246,9 @@ class NovelAIPlugin(Star):
         seed = item["seed"]
         payload = item["payload"]
 
+        profile = self._get_platform_profile(event)
+        access_control = profile.access_control
+
         if not self.nai_api:
             await self._send_text(event, sender_name, user_id, "NovelAI 服务未就绪")
             return
@@ -223,7 +256,7 @@ class NovelAIPlugin(Star):
         try:
             image_bytes = await self.nai_api.generate_image(payload)
             file_path = self._store_image(image_bytes, model, seed)
-            await self.access_control.consume_quota(user_id)
+            await access_control.consume_quota(user_id)
             chain = MessageChain()
             chain.chain.append(At(name=sender_name, qq=user_id))
             chain.chain.append(Plain(f"图片生成完成！模型: {model}，种子: {seed}"))
@@ -249,19 +282,36 @@ class NovelAIPlugin(Star):
                 parts.append(comp.text)
         return "".join(parts).strip()
 
+    def _extract_discord_command_text(self, event: AstrMessageEvent) -> str:
+        raw = getattr(event.message_obj, "raw_message", None)
+        if not raw:
+            return ""
+        try:
+            data = getattr(raw, "data", None)
+            if isinstance(data, dict) and data.get("options"):
+                values: list[str] = []
+                for option in data.get("options", []):
+                    if isinstance(option, dict):
+                        value = option.get("value")
+                        if value is not None:
+                            values.append(str(value))
+                if values:
+                    return " ".join(values).strip()
+        except Exception:  # noqa: BLE001 - Fallback to clean_content
+            pass
+
+        clean_content = getattr(raw, "clean_content", "")
+        cleaned = clean_content.strip()
+        if cleaned.lower().startswith("/nai"):
+            cleaned = cleaned[len("/nai"):].strip()
+        return cleaned
+
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         user_id = event.get_sender_id()
         return event.is_admin() or user_id in self.config.admin_qq_list
 
     def _is_group_message(self, event: AstrMessageEvent) -> bool:
         return bool(event.get_group_id())
-
-    def _bot_is_mentioned(self, event: AstrMessageEvent) -> bool:
-        self_id = str(event.get_self_id())
-        for comp in event.get_messages():
-            if isinstance(comp, At) and str(comp.qq) == self_id:
-                return True
-        return False
 
     def _resolve_target(self, event: AstrMessageEvent, target: str) -> Tuple[Optional[str], Optional[str]]:
         messages = list(event.get_messages())
@@ -271,29 +321,63 @@ class NovelAIPlugin(Star):
             if isinstance(comp, At) and str(comp.qq) != event.get_self_id()
         ]
 
+        raw_message = getattr(event.message_obj, "raw_message", None)
+        is_discord = event.get_platform_name().lower() == "discord"
+
         cleaned = target.strip()
+        if is_discord and not cleaned and raw_message is not None:
+            options = getattr(getattr(raw_message, "data", None), "get", lambda _: None)("options")
+            if options:
+                cleaned = " ".join(str(opt.get("value", "")) for opt in options if opt.get("value"))
+            if not cleaned:
+                cleaned = getattr(raw_message, "clean_content", "").strip()
+
         if cleaned:
+            mention_match = re.fullmatch(r"<@!?([0-9]+)>", cleaned)
+            if mention_match:
+                user_id = mention_match.group(1)
+                nickname = None
+                if is_discord:
+                    nickname = self._fetch_discord_member_name(raw_message, user_id)
+                return user_id, nickname or user_id
+
             cleaned = cleaned.lstrip("@")
             for comp in at_components:
                 qq_str = str(comp.qq)
                 comp_name = (comp.name or "").strip() or None
                 if cleaned == qq_str or (comp_name and cleaned == comp_name):
-                    return qq_str, comp_name or cleaned
+                    nickname = comp_name or cleaned
+                    if is_discord:
+                        nickname = self._fetch_discord_member_name(raw_message, qq_str) or nickname
+                    return qq_str, nickname
             if len(at_components) == 1:
                 comp = at_components[0]
-                return str(comp.qq), cleaned or (comp.name or None)
+                qq_str = str(comp.qq)
+                nickname = cleaned or (comp.name or None)
+                if is_discord:
+                    nickname = self._fetch_discord_member_name(raw_message, qq_str) or nickname
+                return qq_str, nickname
             digits = re.search(r"\d{5,}", cleaned)
             if digits:
                 qq_val = digits.group(0)
                 nick = cleaned.replace(qq_val, "").strip()
                 nick = nick.strip("()（）") or None
+                if is_discord:
+                    nick = self._fetch_discord_member_name(raw_message, qq_val) or nick
                 return qq_val, nick or cleaned
+            if is_discord:
+                nick = self._fetch_discord_member_name(raw_message, cleaned)
+                if nick:
+                    return cleaned, nick
             return cleaned, cleaned or None
 
         if at_components:
             comp = at_components[0]
             comp_name = (comp.name or "").strip() or None
-            return str(comp.qq), comp_name
+            nick = comp_name
+            if is_discord:
+                nick = self._fetch_discord_member_name(raw_message, str(comp.qq)) or nick
+            return str(comp.qq), nick
 
         return None, None
 
@@ -427,12 +511,13 @@ class NovelAIPlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result("仅管理员可执行此操作")
             return
+        access_control = self._get_platform_profile(event).access_control
         qq, default_name = self._resolve_target(event, target)
         if not qq:
             yield event.plain_result("请提供要添加的QQ号或@目标")
             return
         nick = nickname.strip() or default_name
-        user = await self.access_control.add_to_whitelist(qq, nickname=nick)
+        user = await access_control.add_to_whitelist(qq, nickname=nick)
         yield event.plain_result(
             f"已添加 {qq} 至白名单，昵称：{user.nickname or '未设'}，今日剩余 {user.remaining}/{user.daily_limit} 次",
         )
@@ -442,11 +527,12 @@ class NovelAIPlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result("仅管理员可执行此操作")
             return
+        access_control = self._get_platform_profile(event).access_control
         qq, _ = self._resolve_target(event, target)
         if not qq:
             yield event.plain_result("请提供要删除的QQ号或@目标")
             return
-        removed = await self.access_control.remove_from_whitelist(qq)
+        removed = await access_control.remove_from_whitelist(qq)
         if removed:
             yield event.plain_result(f"已从白名单移除 {qq}")
         else:
@@ -461,6 +547,7 @@ class NovelAIPlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result("仅管理员可执行此操作")
             return
+        access_control = self._get_platform_profile(event).access_control
         qq, default_name = self._resolve_target(event, target)
         if not qq:
             yield event.plain_result("请提供要设置的QQ号或@目标")
@@ -472,7 +559,7 @@ class NovelAIPlugin(Star):
             return
         try:
             nick = nickname.strip() or default_name
-            user = await self.access_control.set_quota(qq, limit_value, nickname=nick)
+            user = await access_control.set_quota(qq, limit_value, nickname=nick)
         except ValueError as exc:
             yield event.plain_result(str(exc))
             return
@@ -500,11 +587,13 @@ class NovelAIPlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result("仅管理员可执行此操作")
             return
+        profile = self._get_platform_profile(event)
+        access_control = profile.access_control
         group_id, group_name = self._resolve_group_target(event, target, name)
         if not group_id:
             yield event.plain_result("请提供群号，或在目标群内使用该命令")
             return
-        entry = await self.access_control.add_group(group_id, group_name)
+        entry = await access_control.add_group(group_id, group_name)
         yield event.plain_result(
             f"已添加群 {group_id} 至白名单，名称：{entry.get('name') or '未设'}",
         )
@@ -514,22 +603,38 @@ class NovelAIPlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result("仅管理员可执行此操作")
             return
+        access_control = self._get_platform_profile(event).access_control
         group_id, _ = self._resolve_group_target(event, target, "")
         if not group_id:
             yield event.plain_result("请提供群号，或在目标群内使用该命令")
             return
-        removed = await self.access_control.remove_group(group_id)
+        removed = await access_control.remove_group(group_id)
         if removed:
             yield event.plain_result(f"已从群白名单移除 {group_id}")
         else:
             yield event.plain_result("该群不在白名单中")
+
+    @filter.command("nai_whitelist_add")
+    async def whitelist_add_en(self, event: AstrMessageEvent, target: str = "", nickname: str = ""):
+        async for result in self.whitelist_add(event, target, nickname):
+            yield result
+
+    @filter.command("nai_whitelist_remove")
+    async def whitelist_remove_en(self, event: AstrMessageEvent, target: str = ""):
+        async for result in self.whitelist_remove(event, target):
+            yield result
 
     def _init_nai_api(self):
         self._init_error = None
         try:
             if not self.config.nai_token:
                 raise NovelAIAPIError("未配置 NovelAI Token")
-            self.nai_api = NovelAIAPI(self.config.nai_token, proxy=self.config.proxy)
+            self.nai_api = NovelAIAPI(
+                self.config.nai_token,
+                proxy=self.config.proxy,
+                quality_words=self.config.quality_words,
+                preset_uc=self.config.preset_uc,
+            )
         except NovelAIAPIError as exc:
             self.nai_api = None
             self._init_error = str(exc)
@@ -541,31 +646,76 @@ class NovelAIPlugin(Star):
         self._init_nai_api()
 
     async def _reload_config_from_file(self) -> Tuple[bool, str]:
-        self._ensure_default_files()
+        self._ensure_default_config()
         try:
             new_config = self._load_config()
         except RuntimeError as exc:
             return False, str(exc)
 
         self.config = new_config
-        self.access_control.default_daily_limit = self.config.default_daily_limit
-        self.access_control.storage_path = str(self.whitelist_path)
+        for profile in self.platform_profiles.values():
+            profile.access_control.default_daily_limit = self.config.default_daily_limit
 
         await self._reset_api()
         if self._init_error:
             return False, f"配置重载完成，但 NovelAI 初始化失败：{self._init_error}"
         return True, "插件配置已重新加载"
 
-    def _ensure_default_files(self) -> None:
-        output_dir = (self.plugin_dir / "outputs").resolve()
+    def _ensure_default_config(self) -> None:
         default_preset_uc = "lowres, bad anatomy, bad hands, worst quality, jpeg artifacts"
+        default_quality_words = "best quality, masterpiece"
         if not self.config_path.exists():
             content = DEFAULT_CONFIG_TEMPLATE.format(
-                image_save_path=str(output_dir).replace("\\", "/"),
+                image_save_path=str((self.plugin_dir / "outputs").resolve()).replace("\\", "/"),
                 preset_uc=default_preset_uc,
+                quality_words=default_quality_words,
             )
             self.config_path.write_text(content, encoding="utf-8")
-        if not self.whitelist_path.exists():
-            default_whitelist = {"users": {}, "groups": {}}
-            with self.whitelist_path.open("w", encoding="utf-8") as f:
-                json.dump(default_whitelist, f, ensure_ascii=False, indent=2)
+
+    def _get_platform_key(self, event: AstrMessageEvent) -> str:
+        return event.get_platform_name().lower()
+
+    def _get_platform_profile(self, event: AstrMessageEvent) -> PlatformProfile:
+        key = self._get_platform_key(event)
+        profile = self.platform_profiles.get(key)
+        if profile:
+            return profile
+
+        platform_dir = self.config_dir / key
+        platform_dir.mkdir(parents=True, exist_ok=True)
+        whitelist_path = platform_dir / "whitelist.json"
+        if not whitelist_path.exists():
+            whitelist_path.write_text(
+                json.dumps({"users": {}, "groups": {}}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        access_control = AccessControl(str(whitelist_path), self.config.default_daily_limit)
+        use_group_whitelist = key not in {"discord"}
+        profile = PlatformProfile(
+            platform_name=key,
+            access_control=access_control,
+            whitelist_path=whitelist_path,
+            use_group_whitelist=use_group_whitelist,
+        )
+        self.platform_profiles[key] = profile
+        return profile
+
+    def _fetch_discord_member_name(self, raw_message, user_id: str) -> Optional[str]:
+        if raw_message is None:
+            return None
+        try:
+            guild = getattr(raw_message, "guild", None)
+            if guild is not None:
+                member = guild.get_member(int(user_id))
+                if member is not None:
+                    return getattr(member, "display_name", None) or getattr(member, "name", None)
+            mentions = getattr(raw_message, "mentions", []) or []
+            for member in mentions:
+                if str(member.id) == str(user_id):
+                    return getattr(member, "display_name", None) or getattr(member, "name", None)
+            author = getattr(raw_message, "author", None)
+            if author and str(getattr(author, "id", None)) == str(user_id):
+                return getattr(author, "display_name", None) or getattr(author, "name", None)
+        except Exception:  # noqa: BLE001
+            return None
+        return None

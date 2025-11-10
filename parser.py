@@ -45,6 +45,7 @@ class ParsedParams:
     character_reference_strength: float = 1.0
     style_aware: bool = False
     raw_params: Dict[str, str] = field(default_factory=dict)
+    auto_positive: bool = False
 
 
 _PAIR_PATTERN = re.compile(r"\s*(\S+)[：:]\s*<(.*?)>(?=\s*\S+[：:]\s*<|\s*$)", re.S)
@@ -136,8 +137,23 @@ def parse_generation_message(message: str) -> ParsedParams:
     if not message:
         raise ParseError("指令格式错误，缺少/nai开头")
 
-    # 统一替换中文逗号为英文逗号，避免参数分隔问题
-    message = message.replace("，", ",")
+    # 统一替换常见中文标点为英文标点，避免解析问题
+    punct_map = {
+        "，": ",",
+        "。": ".",
+        "：": ":",
+        "；": ";",
+        "（": "(",
+        "）": ")",
+        "【": "[",
+        "】": "]",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+    }
+    for zh, en in punct_map.items():
+        message = message.replace(zh, en)
 
     stripped = message.strip()
     if not (stripped == "/nai" or stripped.startswith("/nai")):
@@ -148,11 +164,13 @@ def parse_generation_message(message: str) -> ParsedParams:
         raise ParseError("未填写提示词")
 
     pairs = _collect_pairs(content)
-    if not pairs:
-        raise ParseError("参数格式错误，请使用 Key:<Value> 格式")
-
     general_params: Dict[str, str] = {}
     character_params: Dict[int, Dict[str, str]] = {}
+
+    auto_positive = False
+    if not pairs:
+        general_params["正面词条"] = content
+        auto_positive = True
 
     def _set_character_param(key: str, value: str) -> bool:
         if not key.startswith("角色"):
@@ -232,9 +250,8 @@ def parse_generation_message(message: str) -> ParsedParams:
     if sampler not in SAMPLERS:
         raise ParseError("采样器参数无效")
 
-    use_character_zones = _parse_bool(
-        general_params.get("角色是否分区"), "角色是否分区", default=False
-    )
+    use_zone_raw = general_params.get("角色是否分区")
+    use_character_zones = _parse_bool(use_zone_raw, "角色是否分区", default=False)
 
     if len(character_params) > 5:
         raise ParseError("角色数量最多支持5个")
@@ -256,7 +273,9 @@ def parse_generation_message(message: str) -> ParsedParams:
             ),
         )
 
-    if len(characters) <= 1:
+    if use_zone_raw is None:
+        use_character_zones = len(characters) > 1
+    if use_character_zones and not characters:
         use_character_zones = False
 
     character_reference = general_params.get("角色参考") or None
@@ -296,4 +315,5 @@ def parse_generation_message(message: str) -> ParsedParams:
         character_reference_strength=character_reference_strength,
         style_aware=style_aware,
         raw_params=general_params,
+        auto_positive=auto_positive,
     )

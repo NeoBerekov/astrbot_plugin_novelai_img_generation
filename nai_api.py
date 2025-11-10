@@ -45,12 +45,21 @@ _MODEL_BUILDERS = {
 class NovelAIAPI:
     API_URL = "https://image.novelai.net/ai/generate-image"
 
-    def __init__(self, token: str, proxy: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        proxy: Optional[str] = None,
+        *,
+        quality_words: str = "",
+        preset_uc: str = "",
+    ) -> None:
         if not token:
             raise NovelAIAPIError("未配置NovelAI Token")
         self.token = token
         self.proxy = proxy
         self._session: Optional[aiohttp.ClientSession] = None
+        self.quality_words = quality_words
+        self.preset_uc = preset_uc
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -78,25 +87,37 @@ class NovelAIAPI:
         seed = parsed.seed if parsed.seed is not None else random.randint(1_000_000_000, 9_999_999_999)
 
         prompt = parsed.positive_prompt.strip()
+        prompt_lower = prompt.lower()
+
         if parsed.furry_mode:
             prompt = f"fur dataset, {prompt}"
 
         quality_tags = get_quality_tags(model)
         if parsed.add_quality_tags and quality_tags:
             prompt = f"{prompt}{quality_tags}"
+            prompt_lower = prompt.lower()
 
-        negative_prompt = parsed.negative_prompt or get_negative_preset(model, parsed.negative_preset)
+        if not yn_in_prompt(prompt_lower, "best quality") or not yn_in_prompt(prompt_lower, "masterpiece"):
+            custom_quality = self.quality_words.strip()
+            if custom_quality:
+                prompt = f"{prompt}, {custom_quality}" if prompt else custom_quality
+
+        parsed_negative = (parsed.negative_prompt or "").strip()
+        if parsed_negative:
+            negative_prompt = parsed_negative
+        elif self.preset_uc.strip():
+            negative_prompt = self.preset_uc.strip()
+        else:
+            negative_prompt = get_negative_preset(model, parsed.negative_preset)
         uc_preset_value = get_uc_preset_value(model, parsed.negative_preset)
         skip_sigma = get_skip_cfg_above_sigma(model)
 
         characters_exist = bool(parsed.characters)
         use_zones = parsed.use_character_zones and characters_exist
-        extra_positive_parts = []
-        extra_negative_parts = []
         v4_positive = []
         v4_negative = []
         character_prompts = []
-        if use_zones:
+        if characters_exist:
             for char in parsed.characters:
                 center = _character_center(char)
                 v4_positive.append({"char_caption": char.positive, "centers": [center]})
@@ -109,19 +130,6 @@ class NovelAIAPI:
                         "enabled": True,
                     },
                 )
-        elif characters_exist:
-            for char in parsed.characters:
-                if char.positive:
-                    extra_positive_parts.append(char.positive)
-                if char.negative:
-                    extra_negative_parts.append(char.negative)
-
-        if extra_positive_parts:
-            addon = ", ".join(extra_positive_parts)
-            prompt = f"{prompt}, {addon}" if prompt else addon
-        if extra_negative_parts:
-            addon = ", ".join(extra_negative_parts)
-            negative_prompt = f"{negative_prompt}, {addon}" if negative_prompt else addon
 
         payload = builder(
             prompt=prompt,
@@ -230,3 +238,7 @@ class NovelAIAPI:
 def _character_center(character: CharacterPrompt) -> dict:
     x, y = position_to_float(character.position)
     return {"x": x, "y": y}
+
+
+def yn_in_prompt(prompt: str, keyword: str) -> bool:
+    return keyword in prompt

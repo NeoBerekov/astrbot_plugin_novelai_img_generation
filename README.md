@@ -31,6 +31,7 @@
    default_model: "nai-diffusion-4-5-curated"
    image_save_path: "C:/Absolute/Path/To/astrbot_plugin_novelai_img_generation/outputs"
    preset_uc: "lowres, bad anatomy, bad hands, worst quality, jpeg artifacts"
+   quality_words: "best quality, masterpiece"
    default_daily_limit: 10
    admin_qq_list:
      - "12345678"
@@ -41,6 +42,7 @@
    - `default_model`：默认生成模型，可被指令覆盖。
    - `image_save_path`：生成结果保存路径（必须为绝对路径）。
    - `preset_uc`：当指令里未填写“负面词条”时，使用的默认负面提示词；留空则回退到内置 Heavy 预设。
+   - `quality_words`：当主提示词中缺少 `best quality` 或 `masterpiece` 时自动追加的质量词列表。
    - `admin_qq_list`：可执行管理命令的 QQ 号。
 
 3. 插件同样会在缺少文件时自动创建 `AstrBot/data/config/whitelist.json`；你也可以预置内容，结构如下：

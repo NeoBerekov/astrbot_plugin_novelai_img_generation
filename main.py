@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -102,7 +102,10 @@ class NovelAIPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         # 迁移旧配置文件（如果存在）
         self._migrate_config_files()
+        # 确保默认配置文件存在
         self._ensure_default_config()
+        # 确保所有平台的 whitelist 文件存在
+        self._ensure_default_whitelists()
         self.config = self._load_config()
         self.platform_profiles: dict[str, PlatformProfile] = {}
         self.nai_api: Optional[NovelAIAPI] = None
@@ -992,6 +995,7 @@ class NovelAIPlugin(Star):
                     logger.warning(f"迁移 {platform} 白名单失败: {exc}")
 
     def _ensure_default_config(self) -> None:
+        """确保配置文件存在，如果不存在则创建默认模板。"""
         default_preset_uc = "lowres, bad anatomy, bad hands, worst quality, jpeg artifacts"
         default_quality_words = "best quality, masterpiece"
         if not self.config_path.exists():
@@ -1001,6 +1005,47 @@ class NovelAIPlugin(Star):
                 quality_words=default_quality_words,
             )
             self.config_path.write_text(content, encoding="utf-8")
+            logger.info(f"已创建默认配置文件: {self.config_path}")
+
+    def _ensure_default_whitelists(self) -> None:
+        """确保所有平台的 whitelist.json 文件存在，如果不存在则创建示例文件。"""
+        # 支持的平台列表
+        platforms = ["aiocqhttp", "discord"]
+        
+        # 示例 whitelist 数据
+        example_whitelist = {
+            "users": {
+                "12345678": {
+                    "daily_limit": 10,
+                    "remaining": 10,
+                    "last_reset": date.today().isoformat(),
+                    "last_used_at": None,
+                    "nickname": "示例用户"
+                }
+            },
+            "groups": {
+                "123456789": {
+                    "name": "示例测试群"
+                }
+            }
+        }
+        
+        for platform in platforms:
+            platform_dir = self.data_dir / platform
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            whitelist_path = platform_dir / "whitelist.json"
+            
+            if not whitelist_path.exists():
+                # 对于 Discord 平台，不创建示例群组（因为 Discord 不使用群白名单）
+                whitelist_data = example_whitelist.copy()
+                if platform == "discord":
+                    whitelist_data["groups"] = {}
+                
+                whitelist_path.write_text(
+                    json.dumps(whitelist_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                logger.info(f"已创建 {platform} 平台白名单示例文件: {whitelist_path}")
 
     def _get_platform_key(self, event: AstrMessageEvent) -> str:
         return event.get_platform_name().lower()

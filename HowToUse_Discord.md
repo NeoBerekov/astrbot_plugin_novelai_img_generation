@@ -59,7 +59,7 @@
 
 ## 5. 归档与白名单位置
 
-- 白名单数据存放在 `AstrBot/data/config/discord/whitelist.json`。
+- 白名单数据存放在 `AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/data/discord/whitelist.json`。
 - 每位成员在白名单中会记录 ID、昵称、每日限额、剩余次数等信息。
 
 ---
@@ -77,6 +77,6 @@
 
 - 打开 Slash 命令的自动补全，可以避免格式错误。
 - 提示词可以从简单到复杂逐步尝试，熟悉风格后再添加更多细节。
-- 若需要和 QQ 平台同步管理，管理员可以到 `AstrBot/data/config/discord/whitelist.json` 中查看或编辑记录。
+- 若需要和 QQ 平台同步管理，管理员可以到 `AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/data/discord/whitelist.json` 中查看或编辑记录。
 
 希望这份指南能帮助你快速上手 Discord 平台的生图功能！

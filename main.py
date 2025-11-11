@@ -27,11 +27,27 @@ from astrbot.core.message.message_event_result import MessageChain
 from .access_control import AccessControl
 from .constants import MODELS
 from .image_utils import image_to_base64, save_image_from_bytes
+from .llm_client import LLMError, OpenRouterLLMClient
 from .nai_api import NovelAIAPI, NovelAIAPIError
+from .nl_processor import NLProcessingError, NLProcessor
 from .parser import ParseError, ParsedParams, parse_generation_message
 from .queue_manager import RequestQueue
 
-DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nnai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 负面词条预设（未填写“负面词条”时使用）\npreset_uc: "{preset_uc}"\n\n# 质量词，未检测到 best quality 与 masterpiece 时自动追加\nquality_words: "{quality_words}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n"""
+DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nnai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 负面词条预设（未填写"负面词条"时使用）\npreset_uc: "{preset_uc}"\n\n# 质量词，未检测到 best quality 与 masterpiece 时自动追加\nquality_words: "{quality_words}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n\n# 自然语言处理设置（/nainl 功能）\nnl_settings:\n  # 质量词覆盖（为空则使用全局 quality_words）\n  quality_words_override: ""\n  # 负面词条覆盖（为空则使用全局 preset_uc）\n  negative_preset_override: ""\n  # LLM 提供商，目前支持 openrouter\n  llm_provider: "openrouter"\n  # OpenRouter API 配置\n  openrouter:\n    # API Key（必填，从 https://openrouter.ai 获取）\n    api_key: ""\n    # 使用的模型列表（按优先级排序，会依次尝试直到成功）\n    # 支持的模型格式：provider/model-name，例如：\n    # - "openai/gpt-4o-mini"（推荐，性价比高）\n    # - "openai/gpt-4o"\n    # - "anthropic/claude-3-haiku"\n    # - "anthropic/claude-3.5-sonnet"\n    # - "google/gemini-pro"\n    # 更多模型请访问：https://openrouter.ai/models\n    models:\n      - "openai/gpt-4o-mini"\n      - "anthropic/claude-3-haiku"\n    # API 超时时间（秒）\n    timeout: 30\n    # HTTP-Referer（可选，用于在 openrouter.ai 上进行排名）\n    # 建议填写你的网站或项目 URL\n    http_referer: ""\n    # X-Title（可选，用于在 openrouter.ai 上进行排名）\n    # 建议填写你的项目名称\n    x_title: ""\n  # 提示词模板\n  prompt_templates:\n    # 判断描述详细度的提示词\n    detail_check: |\n      请判断以下用户描述是否足够详细（包含多个元素、风格、构图等细节）。\n      如果详细，回复"详细"；如果不详细，回复"不详细"。\n      用户描述：{user_input}\n    # 扩写用提示词模板（当描述详细时使用）\n    expand: |\n      你是一个专业的AI图像生成提示词助手。用户提供了一个详细的图像描述，请将其转换为NovelAI图像生成所需的参数格式。\n      \n      要求：\n      1. 将描述转换为标准的NovelAI提示词格式\n      2. 使用英文提示词（除非用户明确要求其他语言）\n      3. 保持原描述的核心元素和风格\n      4. 输出格式必须严格按照以下键值对格式：\n      \n      正面词条:<翻译并优化后的英文提示词>\n      负面词条:<常见的负面提示词，如 lowres, bad anatomy 等>\n      分辨率:<竖图/横图/方图>\n      \n      用户描述：{user_input}\n      \n      请直接输出转换后的参数，不要添加任何解释。\n    # 翻译用提示词模板（当描述不详细时使用）\n    translate: |\n      你是一个专业的AI图像生成提示词助手。用户提供了一个简单的图像描述，请将其翻译并扩展为NovelAI图像生成所需的参数格式。\n      \n      要求：\n      1. 将描述翻译为英文\n      2. 适当扩展描述，添加细节（如画质、风格、构图等）\n      3. 输出格式必须严格按照以下键值对格式：\n      \n      正面词条:<翻译并扩展后的英文提示词>\n      负面词条:<常见的负面提示词，如 lowres, bad anatomy 等>\n      分辨率:<竖图/横图/方图>\n      \n      用户描述：{user_input}\n      \n      请直接输出转换后的参数，不要添加任何解释。\n"""
+
+
+@dataclass
+class NLSettings:
+    """自然语言处理设置。"""
+    quality_words_override: str
+    negative_preset_override: str
+    llm_provider: str
+    openrouter_api_key: str
+    openrouter_models: list[str]
+    openrouter_timeout: int
+    openrouter_http_referer: Optional[str]
+    openrouter_x_title: Optional[str]
+    prompt_templates: dict[str, str]
 
 
 @dataclass
@@ -44,6 +60,7 @@ class PluginConfig:
     admin_qq_list: list[str]
     preset_uc: str
     quality_words: str
+    nl_settings: Optional[NLSettings] = None
 
 
 @dataclass
@@ -78,16 +95,21 @@ class NovelAIPlugin(Star):
         super().__init__(context)
         self.context = context
         self.plugin_dir = Path(__file__).parent
-        self.data_root = Path(__file__).resolve().parents[2]
-        self.config_dir = self.data_root / "config"
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_path = self.config_dir / "config.yaml"
+        # 配置文件放在插件文件夹内
+        self.config_path = self.plugin_dir / "config.yaml"
+        # 数据文件夹（用于存放各平台的 whitelist.json）
+        self.data_dir = self.plugin_dir / "data"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # 迁移旧配置文件（如果存在）
+        self._migrate_config_files()
         self._ensure_default_config()
         self.config = self._load_config()
         self.platform_profiles: dict[str, PlatformProfile] = {}
         self.nai_api: Optional[NovelAIAPI] = None
         self._init_error: Optional[str] = None
         self._init_nai_api()
+        self.nl_processor: Optional[NLProcessor] = None
+        self._init_nl_processor()
         self.request_queue = RequestQueue(self._process_queue_item)
 
     async def initialize(self):
@@ -97,6 +119,8 @@ class NovelAIPlugin(Star):
         await self.request_queue.stop()
         if self.nai_api:
             await self.nai_api.close()
+        if self.nl_processor and self.nl_processor.llm_client:
+            await self.nl_processor.llm_client.close()
 
     def _load_config(self) -> PluginConfig:
         defaults = {
@@ -118,6 +142,29 @@ class NovelAIPlugin(Star):
         image_path = Path(str(merged.get("image_save_path", defaults["image_save_path"])) )
         if not image_path.is_absolute():
             image_path = (self.plugin_dir / image_path).resolve()
+        
+        # 加载自然语言设置
+        nl_settings = None
+        nl_config = merged.get("nl_settings", {})
+        if nl_config and isinstance(nl_config, dict):
+            openrouter_config = nl_config.get("openrouter", {})
+            prompt_templates = nl_config.get("prompt_templates", {})
+            nl_settings = NLSettings(
+                quality_words_override=str(nl_config.get("quality_words_override", "") or ""),
+                negative_preset_override=str(nl_config.get("negative_preset_override", "") or ""),
+                llm_provider=str(nl_config.get("llm_provider", "openrouter")),
+                openrouter_api_key=str(openrouter_config.get("api_key", "") or ""),
+                openrouter_models=list(openrouter_config.get("models", ["openai/gpt-4o-mini"])),
+                openrouter_timeout=int(openrouter_config.get("timeout", 30)),
+                openrouter_http_referer=openrouter_config.get("http_referer") or None,
+                openrouter_x_title=openrouter_config.get("x_title") or None,
+                prompt_templates={
+                    "detail_check": str(prompt_templates.get("detail_check", "")),
+                    "expand": str(prompt_templates.get("expand", "")),
+                    "translate": str(prompt_templates.get("translate", "")),
+                },
+            )
+        
         return PluginConfig(
             nai_token=str(merged.get("nai_token", "")),
             proxy=merged.get("proxy") or None,
@@ -127,6 +174,7 @@ class NovelAIPlugin(Star):
             admin_qq_list=[str(x) for x in merged.get("admin_qq_list", [])],
             preset_uc=str(merged.get("preset_uc", "") or ""),
             quality_words=str(merged.get("quality_words", "") or ""),
+            nl_settings=nl_settings,
         )
 
     def _ensure_ready(self) -> Optional[str]:
@@ -648,6 +696,189 @@ class NovelAIPlugin(Star):
         )
         yield event.plain_result(template)
 
+    @filter.command("nainl")
+    async def generate_image_nl(self, event: AstrMessageEvent):
+        """使用自然语言描述生成图片。"""
+        # 检查 NL 处理器是否可用
+        if not self.nl_processor:
+            error_msg = "自然语言处理功能未启用，请检查配置中的 nl_settings"
+            if not self._is_group_message(event):
+                yield event.plain_result(error_msg)
+            return
+
+        error = self._ensure_ready()
+        if error:
+            yield event.plain_result(error)
+            return
+
+        profile = self._get_platform_profile(event)
+        access_control = profile.access_control
+
+        is_group = self._is_group_message(event)
+        group_id = event.get_group_id() if is_group else ""
+
+        if is_group and profile.use_group_whitelist:
+            if not await access_control.check_group_permission(group_id):
+                return
+
+        # 提取用户输入
+        user_input = self._extract_command_text(event)
+        if not user_input and event.get_platform_name().lower() == "discord":
+            user_input = self._extract_discord_command_text(event)
+
+        # 移除命令前缀（支持大小写不敏感）
+        user_input_lower = user_input.lower()
+        if user_input_lower.startswith("/nainl"):
+            user_input = user_input[6:].strip()
+        elif user_input_lower.startswith("nainl"):
+            user_input = user_input[5:].strip()
+
+        if not user_input:
+            if not is_group:
+                yield event.plain_result("请输入图像描述")
+            return
+
+        user_id = event.get_sender_id()
+        user_allowed = await access_control.check_permission(user_id)
+        if not user_allowed:
+            if not is_group:
+                yield event.plain_result("您不在白名单中")
+            return
+
+        if not await access_control.check_quota(user_id):
+            if not is_group:
+                yield event.plain_result("每日限额已达")
+            return
+
+        # 调用 NL 处理器转换自然语言
+        try:
+            converted_params = await self.nl_processor.process(user_input)
+        except NLProcessingError as exc:
+            if not is_group:
+                yield event.plain_result(f"自然语言处理失败：{exc}")
+            return
+
+        # 构建完整的命令文本
+        command_text = f"/nai {converted_params}"
+
+        # 应用质量词和负面词条覆盖（如果有）
+        nl_settings = self.config.nl_settings
+        if nl_settings:
+            # 解析参数
+            try:
+                parsed = parse_generation_message(command_text)
+            except ParseError as exc:
+                if not is_group:
+                    yield event.plain_result(f"参数解析失败：{exc}")
+                return
+
+            # 应用覆盖
+            if nl_settings.quality_words_override and not parsed.positive_prompt:
+                # 如果 NL 处理器没有生成正面词条，使用覆盖的质量词
+                command_text = f"/nai 正面词条:<{nl_settings.quality_words_override}> {converted_params}"
+            elif nl_settings.quality_words_override:
+                # 在现有参数基础上添加质量词覆盖提示
+                # 这里我们通过修改解析后的参数来实现
+                pass  # 暂时不修改，让用户手动控制
+
+            if nl_settings.negative_preset_override and not parsed.negative_prompt:
+                # 如果 NL 处理器没有生成负面词条，添加覆盖的负面词条
+                if "负面词条" not in command_text:
+                    command_text = f"{command_text} 负面词条:<{nl_settings.negative_preset_override}>"
+
+            # 重新解析（如果修改了 command_text）
+            try:
+                parsed = parse_generation_message(command_text)
+            except ParseError as exc:
+                if not is_group:
+                    yield event.plain_result(f"参数解析失败：{exc}")
+                return
+        else:
+            # 没有 NL 设置，直接解析
+            try:
+                parsed = parse_generation_message(command_text)
+            except ParseError as exc:
+                if not is_group:
+                    yield event.plain_result(f"参数解析失败：{exc}")
+                return
+
+        # 应用质量词覆盖到配置（临时）
+        original_quality_words = self.config.quality_words
+        original_preset_uc = self.config.preset_uc
+        if nl_settings:
+            if nl_settings.quality_words_override:
+                self.config.quality_words = nl_settings.quality_words_override
+            if nl_settings.negative_preset_override:
+                self.config.preset_uc = nl_settings.negative_preset_override
+
+        model = parsed.model_name or self.config.default_model
+        if model not in MODELS:
+            if not is_group:
+                yield event.plain_result("模型参数无效")
+            # 恢复原始配置
+            self.config.quality_words = original_quality_words
+            self.config.preset_uc = original_preset_uc
+            return
+
+        try:
+            base_image, character_reference = await self._extract_images(event, parsed)
+        except ValueError as exc:
+            if not is_group:
+                yield event.plain_result(str(exc))
+            # 恢复原始配置
+            self.config.quality_words = original_quality_words
+            self.config.preset_uc = original_preset_uc
+            return
+
+        assert self.nai_api is not None
+        
+        # 临时更新 API 的质量词和负面词条
+        original_api_quality = self.nai_api.quality_words
+        original_api_preset = self.nai_api.preset_uc
+        if nl_settings:
+            if nl_settings.quality_words_override:
+                self.nai_api.quality_words = nl_settings.quality_words_override
+            if nl_settings.negative_preset_override:
+                self.nai_api.preset_uc = nl_settings.negative_preset_override
+
+        try:
+            payload, seed = self.nai_api.build_payload(
+                parsed,
+                model=model,
+                base_image=base_image,
+                character_reference=character_reference,
+            )
+        except NovelAIAPIError as exc:
+            if not is_group:
+                yield event.plain_result(str(exc))
+            # 恢复配置
+            self.config.quality_words = original_quality_words
+            self.config.preset_uc = original_preset_uc
+            self.nai_api.quality_words = original_api_quality
+            self.nai_api.preset_uc = original_api_preset
+            return
+        finally:
+            # 恢复配置
+            self.config.quality_words = original_quality_words
+            self.config.preset_uc = original_preset_uc
+            self.nai_api.quality_words = original_api_quality
+            self.nai_api.preset_uc = original_api_preset
+
+        await self.request_queue.enqueue(
+            {
+                "event": event,
+                "payload": payload,
+                "user_id": user_id,
+                "sender_name": event.get_sender_name() or user_id,
+                "model": model,
+                "seed": seed,
+                "parsed": parsed,
+            },
+        )
+
+        hint = "已加入生成队列（自然语言模式），请稍候~"
+        yield event.plain_result(hint)
+
     def _init_nai_api(self):
         self._init_error = None
         try:
@@ -664,10 +895,54 @@ class NovelAIPlugin(Star):
             self._init_error = str(exc)
             logger.error(f"NovelAI API 初始化失败: {exc}")
 
+    def _init_nl_processor(self):
+        """初始化自然语言处理器。"""
+        if not self.config.nl_settings:
+            logger.debug("未配置自然语言处理设置，/nainl 功能不可用")
+            return
+
+        nl_settings = self.config.nl_settings
+        if nl_settings.llm_provider != "openrouter":
+            logger.warning(f"不支持的 LLM 提供商: {nl_settings.llm_provider}")
+            return
+
+        if not nl_settings.openrouter_api_key:
+            logger.warning("未配置 OpenRouter API Key，/nainl 功能不可用")
+            return
+
+        if not nl_settings.openrouter_models:
+            logger.warning("未配置 OpenRouter 模型列表，/nainl 功能不可用")
+            return
+
+        try:
+            llm_client = OpenRouterLLMClient(
+                api_key=nl_settings.openrouter_api_key,
+                models=nl_settings.openrouter_models,
+                proxy=self.config.proxy,
+                timeout=nl_settings.openrouter_timeout,
+                http_referer=nl_settings.openrouter_http_referer,
+                x_title=nl_settings.openrouter_x_title,
+            )
+            self.nl_processor = NLProcessor(
+                llm_client=llm_client,
+                prompt_templates=nl_settings.prompt_templates,
+            )
+            logger.info("自然语言处理器初始化成功")
+        except LLMError as exc:
+            logger.error(f"自然语言处理器初始化失败: {exc}")
+            self.nl_processor = None
+
     async def _reset_api(self):
         if self.nai_api:
             await self.nai_api.close()
         self._init_nai_api()
+
+    async def _reset_nl_processor(self):
+        """重置自然语言处理器。"""
+        if self.nl_processor and self.nl_processor.llm_client:
+            await self.nl_processor.llm_client.close()
+        self.nl_processor = None
+        self._init_nl_processor()
 
     async def _reload_config_from_file(self) -> Tuple[bool, str]:
         self._ensure_default_config()
@@ -681,9 +956,40 @@ class NovelAIPlugin(Star):
             profile.access_control.default_daily_limit = self.config.default_daily_limit
 
         await self._reset_api()
+        await self._reset_nl_processor()
         if self._init_error:
             return False, f"配置重载完成，但 NovelAI 初始化失败：{self._init_error}"
         return True, "插件配置已重新加载"
+
+    def _migrate_config_files(self) -> None:
+        """迁移旧位置的配置文件到插件目录。"""
+        # 旧配置路径：AstrBot/data/config/
+        old_config_root = self.plugin_dir.parent.parent / "config"
+        
+        # 迁移 config.yaml
+        old_config_path = old_config_root / "config.yaml"
+        if old_config_path.exists() and not self.config_path.exists():
+            try:
+                import shutil
+                shutil.copy2(old_config_path, self.config_path)
+                logger.info(f"已迁移配置文件: {old_config_path} -> {self.config_path}")
+            except Exception as exc:
+                logger.warning(f"迁移配置文件失败: {exc}")
+        
+        # 迁移各平台的 whitelist.json
+        for platform in ["aiocqhttp", "discord"]:
+            old_whitelist_path = old_config_root / platform / "whitelist.json"
+            new_platform_dir = self.data_dir / platform
+            new_platform_dir.mkdir(parents=True, exist_ok=True)
+            new_whitelist_path = new_platform_dir / "whitelist.json"
+            
+            if old_whitelist_path.exists() and not new_whitelist_path.exists():
+                try:
+                    import shutil
+                    shutil.copy2(old_whitelist_path, new_whitelist_path)
+                    logger.info(f"已迁移 {platform} 白名单: {old_whitelist_path} -> {new_whitelist_path}")
+                except Exception as exc:
+                    logger.warning(f"迁移 {platform} 白名单失败: {exc}")
 
     def _ensure_default_config(self) -> None:
         default_preset_uc = "lowres, bad anatomy, bad hands, worst quality, jpeg artifacts"
@@ -705,7 +1011,8 @@ class NovelAIPlugin(Star):
         if profile:
             return profile
 
-        platform_dir = self.config_dir / key
+        # whitelist.json 放在插件文件夹的 data 目录下，按平台分目录
+        platform_dir = self.data_dir / key
         platform_dir.mkdir(parents=True, exist_ok=True)
         whitelist_path = platform_dir / "whitelist.json"
         if not whitelist_path.exists():

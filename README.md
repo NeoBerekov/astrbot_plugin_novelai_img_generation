@@ -5,10 +5,11 @@
 ## 功能总览
 
 - `/nai` 指令发起图片生成，支持中文/英文冒号的 `Key:<Value>` 参数格式。
+- **`/nainl` 自然语言生图**：支持任意语言的自然语言描述，自动转换为标准参数格式。
 - 参数解析内建默认值、范围校验与角色定位、福瑞等高级开关。
 - 支持底图（Image2Image）、角色参考、角色分区（最多 5 角色）。
 - 请求进入异步队列顺序执行，每次生成之间随机延迟 3~5 秒。
-- 用户白名单 + 每日限额控制，数据持久化于 `AstrBot/data/config/whitelist.json`。
+- 用户白名单 + 每日限额控制，数据持久化于插件目录下的 `data/{platform}/whitelist.json`。
 - **群白名单**：仅白名单群 + 白名单用户 + 群内 @ 机器人时才响应，私聊不受影响。
 - `/nai插件重启` 支持热加载 `config.yaml`，无需重启 AstraBot。
 
@@ -29,9 +30,9 @@
    pip install -r AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/requirements.txt
    ```
 
-2. 首次运行插件若检测不到配置文件，会自动在 `AstrBot/data/config/` 生成模板；也可手动编辑：
+2. 首次运行插件若检测不到配置文件，会自动在插件目录生成模板；也可手动编辑：
 
-   `AstrBot/data/config/config.yaml`
+   `AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/config.yaml`
 
    ```yaml
    # NovelAI 插件配置模板
@@ -53,8 +54,11 @@
    - `preset_uc`：当指令里未填写“负面词条”时，使用的默认负面提示词；留空则回退到内置 Heavy 预设。
    - `quality_words`：当主提示词中缺少 `best quality` 或 `masterpiece` 时自动追加的质量词列表。
    - `admin_qq_list`：可执行管理命令的 QQ 号。
+   - `nl_settings`：自然语言处理设置（可选，用于启用 `/nainl` 功能），详见下方说明。
 
-3. 插件同样会在缺少文件时自动创建 `AstrBot/data/config/whitelist.json`；你也可以预置内容，结构如下：
+3. 插件同样会在缺少文件时自动创建各平台的白名单文件；你也可以预置内容，结构如下：
+   - QQ 平台：`AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/data/aiocqhttp/whitelist.json`
+   - Discord 平台：`AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/data/discord/whitelist.json`
 
    ```json
    {
@@ -120,6 +124,69 @@
 | 角色参考强度 | 0~1 | 1 |
 | 是否注意原画风 | `是/否` | 否 |
 | 模型 | 可覆盖默认模型 | `config.yaml` 中设置 |
+
+## 指令 `/nainl`（自然语言生图）
+
+`/nainl` 允许用户使用自然语言描述图像需求，插件会自动调用大语言模型（LLM）将描述转换为标准的 `/nai` 参数格式，然后复用现有的生图流程。
+
+### 功能特点
+
+- **多语言支持**：支持任意语言的自然语言输入（中文、英文、日文等）。
+- **智能判断**：自动判断描述详细度，选择“扩写”或“翻译扩展”模板。
+- **配置覆盖**：支持为 `/nainl` 单独配置质量词和负面词条覆盖。
+- **可扩展架构**：LLM 客户端采用抽象接口设计，便于后续接入其他 API 供应商。
+
+### 配置要求
+
+在 `config.yaml` 中添加 `nl_settings` 配置节（用于启用 `/nainl` 功能）：
+
+```yaml
+nl_settings:
+  # 质量词覆盖（为空则使用全局 quality_words）
+  quality_words_override: ""
+  # 负面词条覆盖（为空则使用全局 preset_uc）
+  negative_preset_override: ""
+  # LLM 提供商，目前支持 openrouter
+  llm_provider: "openrouter"
+  # OpenRouter API 配置
+  openrouter:
+    # API Key（必填，从 https://openrouter.ai 获取）
+    api_key: "your_openrouter_api_key"
+    # 使用的模型列表（按优先级排序，会依次尝试）
+    models:
+      - "openai/gpt-4o-mini"
+      - "anthropic/claude-3-haiku"
+    # API 超时时间（秒）
+    timeout: 30
+  # 提示词模板（可选，使用默认模板时可省略）
+  prompt_templates:
+    detail_check: |
+      请判断以下用户描述是否足够详细...
+    expand: |
+      你是一个专业的AI图像生成提示词助手...
+    translate: |
+      你是一个专业的AI图像生成提示词助手...
+```
+
+### 使用示例
+
+```
+/nainl 一个穿着蓝色连衣裙的长发少女，站在樱花树下，阳光透过树叶洒在她身上
+```
+
+插件会：
+1. 调用 LLM 判断描述详细度
+2. 根据详细度选择模板（扩写或翻译扩展）
+3. 将自然语言转换为标准参数格式
+4. 应用配置的质量词/负面词条覆盖（如果有）
+5. 复用 `/nai` 的生图流程
+
+### 注意事项
+
+- `/nainl` 功能需要正确配置 `nl_settings` 才能使用，否则会提示功能未启用。
+- LLM API 调用会产生额外费用，请根据 OpenRouter 的定价合理使用。
+- 如果 LLM 返回的参数格式不正确，插件会尝试清理提取，失败时会返回错误信息。
+- 配置修改后需要执行 `/nai插件重启` 才能生效。
 
 ## 管理命令一览
 

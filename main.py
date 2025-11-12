@@ -33,7 +33,7 @@ from .nl_processor import NLProcessingError, NLProcessor
 from .parser import ParseError, ParsedParams, parse_generation_message
 from .queue_manager import RequestQueue
 
-DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nnai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 负面词条预设（未填写"负面词条"时使用）\npreset_uc: "{preset_uc}"\n\n# 质量词，未检测到 best quality 与 masterpiece 时自动追加\nquality_words: "{quality_words}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n\n# 自然语言处理设置（/nainl 功能）\nnl_settings:\n  # 质量词覆盖（为空则使用全局 quality_words）\n  quality_words_override: ""\n  # 负面词条覆盖（为空则使用全局 preset_uc）\n  negative_preset_override: ""\n  # LLM 提供商，目前支持 openrouter\n  llm_provider: "openrouter"\n  # OpenRouter API 配置\n  openrouter:\n    # API Key（必填，从 https://openrouter.ai 获取）\n    api_key: ""\n    # 使用的模型列表（按优先级排序，会依次尝试直到成功）\n    # 支持的模型格式：provider/model-name，例如：\n    # - "openai/gpt-4o-mini"（推荐，性价比高）\n    # - "openai/gpt-4o"\n    # - "anthropic/claude-3-haiku"\n    # - "anthropic/claude-3.5-sonnet"\n    # - "google/gemini-pro"\n    # 更多模型请访问：https://openrouter.ai/models\n    models:\n      - "openai/gpt-4o-mini"\n      - "anthropic/claude-3-haiku"\n    # API 超时时间（秒）\n    timeout: 30\n    # HTTP-Referer（可选，用于在 openrouter.ai 上进行排名）\n    # 建议填写你的网站或项目 URL\n    http_referer: ""\n    # X-Title（可选，用于在 openrouter.ai 上进行排名）\n    # 建议填写你的项目名称\n    x_title: ""\n  # 提示词模板\n  prompt_templates:\n    # 判断描述详细度的提示词\n    detail_check: |\n      请判断以下用户描述是否足够详细（包含多个元素、风格、构图等细节）。\n      如果详细，回复"详细"；如果不详细，回复"不详细"。\n      用户描述：{user_input}\n    # 扩写用提示词模板（当描述详细时使用）\n    expand: |\n      你是一个专业的AI图像生成提示词助手。用户提供了一个详细的图像描述，请将其转换为NovelAI图像生成所需的参数格式。\n      \n      要求：\n      1. 将描述转换为标准的NovelAI提示词格式\n      2. 使用英文提示词（除非用户明确要求其他语言）\n      3. 保持原描述的核心元素和风格\n      4. 输出格式必须严格按照以下键值对格式：\n      \n      正面词条:<翻译并优化后的英文提示词>\n      负面词条:<常见的负面提示词，如 lowres, bad anatomy 等>\n      分辨率:<竖图/横图/方图>\n      \n      用户描述：{user_input}\n      \n      请直接输出转换后的参数，不要添加任何解释。\n    # 翻译用提示词模板（当描述不详细时使用）\n    translate: |\n      你是一个专业的AI图像生成提示词助手。用户提供了一个简单的图像描述，请将其翻译并扩展为NovelAI图像生成所需的参数格式。\n      \n      要求：\n      1. 将描述翻译为英文\n      2. 适当扩展描述，添加细节（如画质、风格、构图等）\n      3. 输出格式必须严格按照以下键值对格式：\n      \n      正面词条:<翻译并扩展后的英文提示词>\n      负面词条:<常见的负面提示词，如 lowres, bad anatomy 等>\n      分辨率:<竖图/横图/方图>\n      \n      用户描述：{user_input}\n      \n      请直接输出转换后的参数，不要添加任何解释。\n"""
+DEFAULT_CONFIG_TEMPLATE = """# NovelAI 插件配置模板\n\n# NovelAI API访问Token，登陆NovelAI后抓取。\nai_token: ""\n\n# HTTP代理，可选。如需走代理，填写例如 http://127.0.0.1:7890\nproxy: ""\n\n# 默认模型，可选值：\n# - nai-diffusion-4-5-full\n# - nai-diffusion-4-5-curated\n# - nai-diffusion-4-full\n# - nai-diffusion-4-curated-preview\n# - nai-diffusion-3\n# - nai-diffusion-furry-3\ndefault_model: "nai-diffusion-4-5-curated"\n\n# 图像保存路径，使用绝对路径\nimage_save_path: "{image_save_path}"\n\n# 负面词条预设（未填写"负面词条"时使用）\npreset_uc: "{preset_uc}"\n\n# 质量词，未检测到 best quality 与 masterpiece 时自动追加\nquality_words: "{quality_words}"\n\n# 默认每日调用次数上限（白名单用户可单独配置）。\ndefault_daily_limit: 10\n\n# 管理员QQ号列表，可在运行时通过命令动态调整。\nadmin_qq_list: []\n\n# 自然语言处理设置（/nainl 功能）\nnl_settings:\n  # 质量词覆盖（为空则使用全局 quality_words）\n  quality_words_override: ""\n  # 负面词条覆盖（为空则使用全局 preset_uc）\n  negative_preset_override: ""\n  # LLM 提供商，目前支持 openrouter\n  llm_provider: "openrouter"\n  # OpenRouter API 配置\n  openrouter:\n    # API Key（必填，从 https://openrouter.ai 获取）\n    api_key: ""\n    # 使用的模型列表（按优先级排序，会依次尝试直到成功）\n    # 支持的模型格式：provider/model-name，例如：\n    # - "openai/gpt-4o-mini"（推荐，性价比高）\n    # - "openai/gpt-4o"\n    # - "anthropic/claude-3-haiku"\n    # - "anthropic/claude-3.5-sonnet"\n    # - "google/gemini-pro"\n    # 更多模型请访问：https://openrouter.ai/models\n    models:\n      - "openai/gpt-4o-mini"\n      - "anthropic/claude-3-haiku"\n    # API 超时时间（秒）\n    timeout: 30\n    # HTTP-Referer（可选，用于在 openrouter.ai 上进行排名）\n    # 建议填写你的网站或项目 URL\n    http_referer: ""\n    # X-Title（可选，用于在 openrouter.ai 上进行排名）\n    # 建议填写你的项目名称\n    x_title: ""\n  # 提示词模板\n  prompt_templates:\n    # 判断描述详细度的提示词\n    detail_check: |\n      你是一个专业的图像生成提示词评估助手。请使用思维链的方式，逐步分析用户描述是否足够详细。\n      \n      分析步骤：\n      \n      第一步：分析主体是否明确\n      - 思考：描述中是否明确指出了图像的主要对象？（如：人物、动物、物体、场景等）\n      - 思考：主体的特征是否足够具体？（如：人物的外貌、物体的形状、场景的类型等）\n      - 结论：如果主体清晰且特征具体，则主体明确；否则主体不明确。\n      \n      第二步：分析细节是否足够\n      - 思考：描述中是否包含了足够的视觉细节？（如：服装、表情、动作、姿态、纹理、材质、装饰等）\n      - 思考：这些细节是否能够帮助生成清晰的图像？\n      - 结论：如果细节丰富且有助于图像生成，则细节足够；否则细节不足。\n      \n      第三步：分析背景是否明确\n      - 思考：描述中是否明确提及了背景环境？（如：室内、室外、具体场景、抽象背景等）\n      - 思考：背景的描述是否足够具体？（如：房间类型、自然环境、城市景观等）\n      - 结论：如果背景描述清晰具体，则背景明确；否则背景不明确。\n      \n      第四步：分析构图是否明确\n      - 思考：描述中是否包含了构图相关信息？（如：全身、半身、特写、远景、中景、近景等）\n      - 思考：是否包含了视角或镜头角度信息？（如：正面、侧面、背面、仰视、俯视、平视等）\n      - 结论：如果构图信息清晰，则构图明确；否则构图不明确。\n      \n      综合判断：\n      - 回顾以上四个步骤的分析结果\n      - 如果主体明确、细节足够、背景明确、构图明确，则整体判断为"详细"\n      - 如果以上任意一个方面不够明确或不足，则整体判断为"不详细"\n      \n      用户描述：{user_input}\n      \n      请在内部完成全部推理，不要向用户展示任何思考过程。最后只回复"详细"或"不详细"，不要添加任何其他文字、解释或标点符号。\n    # 扩写用提示词模板（当描述详细时使用）\n    expand: |\n      你是一个专业的AI图像生成提示词助手。用户提供了一个详细的图像描述，请使用思维链的方式，逐步将其转换为NovelAI图像生成所需的英文提示词。严禁直接返回用户原本的输入内容!!!\n      \n      转换步骤：\n      \n      第一步：识别角色出处\n      - 思考：描述中是否出现疑似有作品出处的角色名称？\n      - 行动：若有，请利用联网搜索功能，先用中文查找其官方英文名，再用该英文名查询其在 danbooru 网站中的准确 tag 名，并在最终输出中使用这个名字。\n      \n      第二步：理解并提取核心元素\n      - 思考：用户描述中的主要对象是什么？（人物、动物、物体、场景等）\n      - 思考：描述中提到了哪些关键特征？（外貌、服装、动作、表情等）\n      - 思考：描述中体现了什么风格或氛围？（艺术风格、情绪、主题等）\n      - 行动：提取并记录这些核心元素，确保不遗漏重要信息。\n      \n      第三步：识别构图和视角信息\n      - 思考：描述中是否包含构图信息？（全身、半身、特写、远景、中景、近景等）\n      - 思考：描述中是否包含视角信息？（正面、侧面、背面、仰视、俯视、平视等）\n      - 行动：将这些构图和视角信息转换为对应的英文tag。\n      \n      第四步：识别背景和环境信息\n      - 思考：描述中是否包含背景信息？（室内、室外、具体场景、抽象背景等）\n      - 思考：背景的具体特征是什么？（房间类型、自然环境、城市景观等）\n      - 行动：将背景信息转换为对应的英文tag或自然语言描述。\n      \n      第五步：转换为danbooru风格的tag\n      - 思考：哪些元素可以用danbooru数据库的tag准确描述？（人物特征、服装、姿势、表情等）\n      - 思考：哪些元素难以用tag描述，需要用自然语言？（复杂场景、抽象概念、特定风格等）\n      - 行动：优先使用danbooru风格的tag，难以用tag描述的部分使用简洁的英文自然语言。\n      \n      第六步：组织提示词结构\n      - 思考：如何组织提示词的顺序？（通常：主体 → 特征 → 动作/姿势 → 服装/装饰 → 背景 → 风格）\n      - 思考：如何确保提示词清晰、具体、易于理解？\n      - 行动：按照合理的顺序组织tag和自然语言，用逗号分隔，确保流畅可读。\n      \n      第七步：最终检查\n      - 检查：是否完全使用英文？（除非用户明确要求其他语言）\n      - 检查：是否保持了原描述的核心元素和风格？\n      - 检查：是否只包含提示词文本，没有添加负面词条、分辨率等参数？\n      - 检查：是否没有附加质量词（如 best quality、masterpiece 等）？\n      - 检查：是否没有直接返回用户原本的输入内容？\n      \n      用户描述：{user_input}\n      \n      请在内部完成全部分析过程，不要输出任何推理、步骤说明或解释。最后只输出转换后的英文提示词，不要添加任何解释、前缀或后缀。\n    # 翻译用提示词模板（当描述不详细时使用）\n    translate: |\n      你是一个专业的AI图像生成提示词助手。用户提供了一个简单的图像描述，请使用思维链的方式，逐步将其翻译并扩展为NovelAI图像生成所需的英文提示词。严禁直接返回用户原本的输入内容!!!\n      \n      转换步骤：\n      \n      第一步：识别角色出处\n      - 思考：描述中是否出现疑似有作品出处的角色名称？\n      - 行动：若有，请利用联网搜索功能，先用中文查找其官方英文名，再用该英文名查询其在 danbooru 网站中的准确 tag 名，并在最终输出中使用这个名字。\n      \n      第二步：理解用户意图\n      - 思考：用户描述的核心内容是什么？（主要对象、基本特征等）\n      - 思考：用户可能想要什么样的图像？（风格、氛围、主题等）\n      - 行动：识别并记录用户描述中的关键信息，理解用户的真实意图。\n      \n      第三步：翻译为英文\n      - 思考：如何将用户描述准确翻译为英文？\n      - 思考：如何保持原意的同时使用地道的英文表达？\n      - 行动：将用户描述翻译为英文，确保准确传达原意。\n      \n      第四步：识别缺失的信息\n      - 思考：描述中缺少哪些重要信息？（主体特征、构图、视角、背景、风格等）\n      - 思考：哪些信息对于生成清晰的图像是必要的？\n      - 行动：识别并记录需要补充的信息类别。\n      \n      第五步：合理扩展描述\n      - 思考：如何补充主体特征？（外貌、体型、年龄等）\n      - 思考：如何补充构图和视角信息？（全身/半身/特写、正面/侧面等）\n      - 思考：如何补充背景信息？（室内/室外、具体场景等）\n      - 思考：如何补充风格信息？（艺术风格、画风等）\n      - 行动：根据用户描述的核心内容，合理扩展并添加必要的细节，确保扩展内容与用户意图一致。\n      \n      第六步：转换为danbooru风格的tag\n      - 思考：哪些元素可以用danbooru数据库的tag准确描述？（人物特征、服装、姿势、表情等）\n      - 思考：哪些元素难以用tag描述，需要用自然语言？（复杂场景、抽象概念、特定风格等）\n      - 行动：优先使用danbooru风格的tag，难以用tag描述的部分使用简洁的英文自然语言。\n      \n      第七步：组织提示词结构\n      - 思考：如何组织提示词的顺序？（通常：主体 → 特征 → 动作/姿势 → 服装/装饰 → 背景 → 风格）\n      - 思考：如何确保提示词清晰、具体、易于理解？\n      - 行动：按照合理的顺序组织tag和自然语言，用逗号分隔，确保流畅可读。\n      \n      第八步：最终检查\n      - 检查：是否完全使用英文？\n      - 检查：是否在保持用户意图的基础上合理扩展了描述？\n      - 检查：是否只包含提示词文本，没有添加负面词条、分辨率等参数？\n      - 检查：是否没有附加质量词（如 best quality、masterpiece 等）？\n      - 检查：是否没有直接返回用户原本的输入内容？\n      - 检查：提示词是否清晰、具体，包含必要的细节？\n      \n      用户描述：{user_input}\n      \n      请在内部完成全部分析过程，不要输出任何推理、步骤说明或解释。最后只输出翻译并扩展后的英文提示词，不要添加任何解释、前缀或后缀。\n"""
 
 
 @dataclass
@@ -296,6 +296,7 @@ class NovelAIPlugin(Star):
         model = item["model"]
         seed = item["seed"]
         payload = item["payload"]
+        llm_model_name = item.get("llm_model")
 
         profile = self._get_platform_profile(event)
         access_control = profile.access_control
@@ -310,7 +311,10 @@ class NovelAIPlugin(Star):
             await access_control.consume_quota(user_id)
             chain = MessageChain()
             chain.chain.append(At(name=sender_name, qq=user_id))
-            chain.chain.append(Plain(f"图片生成完成！模型: {model}，种子: {seed}"))
+            result_text = f"图片生成完成！模型: {model}，种子: {seed}"
+            if llm_model_name:
+                result_text += f"，LLM: {llm_model_name}"
+            chain.chain.append(Plain(result_text))
             chain.chain.append(Image.fromFileSystem(file_path))
             await event.send(chain)
             await self._try_recall_request(event)
@@ -724,23 +728,6 @@ class NovelAIPlugin(Star):
             if not await access_control.check_group_permission(group_id):
                 return
 
-        # 提取用户输入
-        user_input = self._extract_command_text(event)
-        if not user_input and event.get_platform_name().lower() == "discord":
-            user_input = self._extract_discord_command_text(event)
-
-        # 移除命令前缀（支持大小写不敏感）
-        user_input_lower = user_input.lower()
-        if user_input_lower.startswith("/nainl"):
-            user_input = user_input[6:].strip()
-        elif user_input_lower.startswith("nainl"):
-            user_input = user_input[5:].strip()
-
-        if not user_input:
-            if not is_group:
-                yield event.plain_result("请输入图像描述")
-            return
-
         user_id = event.get_sender_id()
         user_allowed = await access_control.check_permission(user_id)
         if not user_allowed:
@@ -753,16 +740,82 @@ class NovelAIPlugin(Star):
                 yield event.plain_result("每日限额已达")
             return
 
-        # 调用 NL 处理器转换自然语言
+        # 提取用户输入
+        user_input = self._extract_command_text(event)
+        if not user_input and event.get_platform_name().lower() == "discord":
+            user_input = self._extract_discord_command_text(event)
+
+        # 移除命令前缀（支持大小写不敏感）
+        user_input_lower = user_input.lower()
+        if user_input_lower.startswith("/nainl"):
+            user_input = user_input[6:].strip()
+        elif user_input_lower.startswith("nainl"):
+            user_input = user_input[5:].strip()
+
+        auto_add_quality_words = True
+        natural_language_input = user_input
+        extracted_positive_prompt = None
+
+        # 尝试解析键值对格式的参数
         try:
-            converted_params = await self.nl_processor.process(user_input)
+            # 使用临时命令格式来解析参数
+            temp_command = f"/nai {user_input}"
+            parsed_temp = parse_generation_message(temp_command)
+            
+            # 检查是否提供了"是否自动添加质量词"参数
+            auto_add_pattern = r"是否自动添加(?:质量词|提示词)[：:]\s*<([^>]+)>"
+            match = re.search(auto_add_pattern, user_input, re.IGNORECASE)
+            if match:
+                value = match.group(1).strip().lower()
+                auto_add_quality_words = value in ["是", "yes", "true", "1"]
+                # 从输入中移除这个参数
+                natural_language_input = re.sub(auto_add_pattern, "", user_input, flags=re.IGNORECASE).strip()
+            else:
+                natural_language_input = user_input
+
+            # 检查是否直接提供了"正面词条"参数
+            if parsed_temp.positive_prompt and not parsed_temp.auto_positive:
+                extracted_positive_prompt = parsed_temp.positive_prompt
+                positive_pattern = r"正面词条[：:]\s*<[^>]+>"
+                natural_language_input = re.sub(positive_pattern, "", natural_language_input, flags=re.IGNORECASE).strip()
+        except ParseError:
+            # 如果解析失败，说明是纯自然语言输入，使用默认值
+            pass
+
+        # 构造用于 LLM 的自然语言描述
+        natural_language_input = natural_language_input.strip()
+        if not natural_language_input and extracted_positive_prompt:
+            natural_language_input = extracted_positive_prompt.strip()
+
+        if not natural_language_input:
+            if not is_group:
+                yield event.plain_result("请输入图像描述")
+            return
+
+        yield event.plain_result("自然语言交由 LLM 分析中，请稍后~")
+
+        # 始终通过 LLM 转换自然语言
+        try:
+            nl_result = await self.nl_processor.process(
+                natural_language_input,
+                auto_add_quality_words=auto_add_quality_words,
+                quality_words=self.config.quality_words,
+            )
+            converted_params = nl_result.params_text
+            llm_model_used = nl_result.model_name
+            parsed_converted = parse_generation_message(f"/nai {converted_params}")
+            positive_prompt = parsed_converted.positive_prompt
         except NLProcessingError as exc:
             if not is_group:
                 yield event.plain_result(f"自然语言处理失败：{exc}")
             return
+        except ParseError as exc:
+            if not is_group:
+                yield event.plain_result(f"参数解析失败：{exc}")
+            return
 
         # 构建完整的命令文本
-        command_text = f"/nai {converted_params}"
+        command_text = f"/nai 正面词条:<{positive_prompt}>"
 
         # 应用质量词和负面词条覆盖（如果有）
         nl_settings = self.config.nl_settings
@@ -778,7 +831,10 @@ class NovelAIPlugin(Star):
             # 应用覆盖
             if nl_settings.quality_words_override and not parsed.positive_prompt:
                 # 如果 NL 处理器没有生成正面词条，使用覆盖的质量词
-                command_text = f"/nai 正面词条:<{nl_settings.quality_words_override}> {converted_params}"
+                if converted_params:
+                    command_text = f"/nai 正面词条:<{nl_settings.quality_words_override}> {converted_params}"
+                else:
+                    command_text = f"/nai 正面词条:<{nl_settings.quality_words_override}>"
             elif nl_settings.quality_words_override:
                 # 在现有参数基础上添加质量词覆盖提示
                 # 这里我们通过修改解析后的参数来实现
@@ -876,6 +932,7 @@ class NovelAIPlugin(Star):
                 "model": model,
                 "seed": seed,
                 "parsed": parsed,
+                "llm_model": llm_model_used,
             },
         )
 

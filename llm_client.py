@@ -85,6 +85,7 @@ class OpenRouterLLMClient(BaseLLMClient):
         self.http_referer = http_referer or "https://github.com/astrbot/novelai-plugin"
         self.x_title = x_title or "NovelAI Plugin"
         self._session: Optional[aiohttp.ClientSession] = None
+        self.last_used_model: Optional[str] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建 HTTP 会话。"""
@@ -135,6 +136,7 @@ class OpenRouterLLMClient(BaseLLMClient):
 
         # 尝试每个模型，直到成功
         last_error: Optional[Exception] = None
+        self.last_used_model = None
         for model in self.models:
             try:
                 # 根据 OpenRouter 文档构建请求体（OpenAI 兼容格式）
@@ -178,6 +180,7 @@ class OpenRouterLLMClient(BaseLLMClient):
                     if not content:
                         raise LLMError("OpenRouter API 返回空内容")
 
+                    self.last_used_model = model
                     return content.strip()
 
             except asyncio.TimeoutError:

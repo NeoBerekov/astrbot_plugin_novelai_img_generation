@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 from astrbot.api import logger
@@ -13,6 +14,14 @@ from .parser import ParseError, parse_generation_message
 
 class NLProcessingError(Exception):
     """自然语言处理错误。"""
+
+
+@dataclass
+class NLProcessResult:
+    """自然语言处理结果。"""
+
+    params_text: str
+    model_name: Optional[str] = None
 
 
 class NLProcessor:
@@ -33,15 +42,22 @@ class NLProcessor:
         self.llm_client = llm_client
         self.prompt_templates = prompt_templates
 
-    async def process(self, user_input: str) -> str:
+    async def process(
+        self,
+        user_input: str,
+        auto_add_quality_words: bool = True,
+        quality_words: str = "",
+    ) -> NLProcessResult:
         """
         处理用户自然语言输入，转换为 /nai 指令格式。
 
         Args:
             user_input: 用户输入的自然语言描述
+            auto_add_quality_words: 是否自动添加质量词，默认为 True
+            quality_words: 质量词内容，当 auto_add_quality_words 为 True 时使用
 
         Returns:
-            转换后的 /nai 指令文本
+            转换后的 /nai 指令结果，包含参数文本和使用的模型名称
 
         Raises:
             NLProcessingError: 处理失败时抛出
@@ -70,29 +86,38 @@ class NLProcessor:
         # 调用 LLM
         try:
             llm_response = await self.llm_client.generate(prompt)
+            print(f"LLM 响应: {llm_response}")
         except LLMError as exc:
             raise NLProcessingError(f"LLM 调用失败: {exc}") from exc
 
-        # 步骤3: 解析 LLM 返回的参数
-        parsed_text = self._extract_parameters(llm_response)
+        # 步骤3: 清理并提取正面词条
+        # LLM 现在只返回英文提示词文本，我们需要将其包装成 "正面词条:<...>" 格式
+        positive_prompt = self._extract_positive_prompt(llm_response)
 
-        # 步骤4: 验证解析结果
+        # 步骤4: 根据 auto_add_quality_words 决定是否添加质量词
+        if auto_add_quality_words and quality_words:
+            quality_words_clean = quality_words.strip().strip(",")
+            if quality_words_clean:
+                # 检查是否已包含质量词
+                if "best quality" not in positive_prompt.lower() and "masterpiece" not in positive_prompt.lower():
+                    # 在正面词条后附加质量词
+                    positive_prompt = f"{positive_prompt}, {quality_words_clean}"
+
+        # 步骤5: 构建参数格式
+        # 只返回正面词条，其他参数使用默认值或由配置覆盖
+        parsed_text = f"正面词条:<{positive_prompt}>"
+
+        # 步骤6: 验证解析结果
         try:
-            # 尝试解析，验证格式是否正确
             parse_generation_message(f"/nai {parsed_text}")
         except ParseError as exc:
-            logger.warning(f"LLM 返回的参数格式验证失败: {exc}，原始响应: {llm_response[:200]}")
-            # 如果解析失败，尝试从响应中提取更干净的部分
-            parsed_text = self._clean_extract(llm_response)
-            # 再次验证
-            try:
-                parse_generation_message(f"/nai {parsed_text}")
-            except ParseError:
-                raise NLProcessingError(
-                    f"LLM 返回的参数格式不正确，无法解析。原始响应: {llm_response[:300]}"
-                ) from exc
+            raise NLProcessingError(
+                f"生成的参数格式验证失败: {exc}，正面词条: {positive_prompt[:200]}"
+            ) from exc
 
-        return parsed_text
+        model_name = getattr(self.llm_client, "last_used_model", None)
+
+        return NLProcessResult(params_text=parsed_text, model_name=model_name)
 
     async def _check_detail(self, user_input: str) -> bool:
         """
@@ -113,8 +138,11 @@ class NLProcessor:
 
         prompt = template.format(user_input=user_input)
         try:
-            response = await self.llm_client.generate(prompt, timeout=15)
+            llm_timeout = getattr(self.llm_client, "timeout", None)
+            response = await self.llm_client.generate(prompt, timeout=llm_timeout)
+            print(f"详细度检查响应: {response}")
             response_lower = response.strip().lower()
+            print(f"详细度检查响应小写: {response_lower}")
             # 检查响应中是否包含"详细"
             return "详细" in response_lower or "detailed" in response_lower
         except LLMError as exc:
@@ -123,95 +151,88 @@ class NLProcessor:
             words = user_input.split()
             return len(words) > 10 or len(user_input) > 50
 
-    def _extract_parameters(self, llm_response: str) -> str:
+    def _extract_positive_prompt(self, llm_response: str) -> str:
         """
-        从 LLM 响应中提取参数文本。
+        从 LLM 响应中提取正面词条（英文提示词）。
 
         Args:
-            llm_response: LLM 原始响应
+            llm_response: LLM 原始响应（应该只包含英文提示词文本）
 
         Returns:
-            提取的参数文本
+            清理后的正面词条文本
         """
-        # 尝试提取键值对格式的内容
-        # 查找类似 "正面词条:<...>" 的模式
-        pattern = r"(正面词条|负面词条|分辨率|步数|指导系数|采样器|模型|底图|底图重绘强度|底图加噪强度|是否有福瑞|添加质量词|角色是否分区|角色\d+正面词条|角色\d+负面词条|角色\d+位置|角色参考|角色参考强度|是否注意原画风|重采样系数|种子)[：:]\s*<[^>]*>"
-        
-        matches = re.findall(pattern, llm_response, re.IGNORECASE)
-        if matches:
-            # 如果找到匹配，尝试提取整个参数块
-            lines = []
-            for line in llm_response.split("\n"):
-                line = line.strip()
-                if re.search(pattern, line, re.IGNORECASE):
-                    lines.append(line)
-            if lines:
-                return " ".join(lines)
-
-        # 如果没有找到标准格式，尝试提取包含键值对的行
-        lines = []
-        for line in llm_response.split("\n"):
-            line = line.strip()
-            # 跳过空行和明显的解释性文字
-            if not line or line.startswith("#") or line.startswith("//"):
-                continue
-            # 如果包含冒号和尖括号，可能是参数
-            if ":" in line or "：" in line:
-                if "<" in line and ">" in line:
-                    lines.append(line)
-                elif re.search(r"[：:]\s*\S+", line):
-                    # 可能是没有尖括号的参数，尝试补充
-                    lines.append(line)
-
-        if lines:
-            return " ".join(lines)
-
-        # 如果都找不到，返回原始响应的前几行（去除明显的解释）
-        cleaned_lines = []
-        for line in llm_response.split("\n")[:10]:
-            line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("//"):
-                cleaned_lines.append(line)
-        return " ".join(cleaned_lines)
-
-    def _clean_extract(self, llm_response: str) -> str:
-        """
-        清理并提取参数文本（备用方法）。
-
-        Args:
-            llm_response: LLM 原始响应
-
-        Returns:
-            清理后的参数文本
-        """
-        # 移除常见的 LLM 解释性前缀
+        # 移除常见的 LLM 解释性前缀和后缀
         prefixes_to_remove = [
-            "以下是转换后的参数：",
-            "转换后的参数如下：",
+            "以下是转换后的提示词：",
+            "转换后的提示词如下：",
             "根据您的要求，",
-            "Here are the converted parameters:",
-            "The converted parameters are:",
+            "Here is the converted prompt:",
+            "The converted prompt is:",
+            "正面词条:",
+            "正面词条：",
+            "Positive prompt:",
+            "Prompt:",
+        ]
+        
+        suffixes_to_remove = [
+            "。",
+            ".",
+            "以上是转换后的提示词。",
+            "This is the converted prompt.",
         ]
 
-        cleaned = llm_response
+        cleaned = llm_response.strip()
+        
+        # 移除前缀
         for prefix in prefixes_to_remove:
-            if cleaned.startswith(prefix):
+            if cleaned.lower().startswith(prefix.lower()):
                 cleaned = cleaned[len(prefix):].strip()
-
-        # 提取所有包含键值对的行
+        
+        # 移除后缀
+        for suffix in suffixes_to_remove:
+            if cleaned.lower().endswith(suffix.lower()):
+                cleaned = cleaned[:-len(suffix)].strip()
+        
+        # 如果响应中包含 "正面词条:<...>" 格式，提取其中的内容
+        pattern = r"正面词条[：:]\s*<([^>]+)>"
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            cleaned = match.group(1).strip()
+        
+        # 如果响应中包含 "Positive prompt: ..." 格式，提取其中的内容
+        pattern = r"positive\s*prompt[：:]\s*(.+)"
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            cleaned = match.group(1).strip()
+        
+        # 移除多余的引号
+        cleaned = cleaned.strip('"').strip("'").strip()
+        
+        # 如果响应是多行的，尝试提取主要内容（跳过明显的解释性文字）
         lines = []
         for line in cleaned.split("\n"):
             line = line.strip()
             if not line:
                 continue
             # 跳过明显的解释性文字
-            if any(
-                skip in line.lower()
-                for skip in ["要求", "要求", "注意", "note", "requirement", "please"]
-            ):
-                if "正面词条" not in line and "positive" not in line.lower():
+            skip_keywords = [
+                "要求", "requirement", "note", "注意", "please",
+                "用户描述", "user input", "description",
+            ]
+            if any(keyword.lower() in line.lower() for keyword in skip_keywords):
+                # 但如果这行包含实际的提示词内容，保留它
+                if not any(char.isalpha() for char in line):
                     continue
             lines.append(line)
-
-        return " ".join(lines)
+        
+        if lines:
+            cleaned = " ".join(lines)
+        
+        # 最终清理：移除多余的空格
+        cleaned = " ".join(cleaned.split())
+        
+        if not cleaned:
+            raise NLProcessingError("无法从 LLM 响应中提取有效的正面词条")
+        
+        return cleaned
 

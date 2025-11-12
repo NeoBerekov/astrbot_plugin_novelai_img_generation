@@ -1,230 +1,152 @@
 # NovelAI 图片生成插件
 
-`astrbot_plugin_novelai_img_generation` 是基于 AstraBot 的 NovelAI 官方 API 图片生成插件，支持文本/图生图、角色定位、参考图等高级参数，并提供完善的权限与限流控制，适用于 QQ 群聊与私聊场景。
+`astrbot_plugin_novelai_img_generation` 是基于 AstraBot 的 NovelAI 官方 API 插件，现已支持文本指令、自然语言转写、角色分区、参考图、质量词自动补全等高级能力，并内置完善的白名单与限流体系，可同时部署在 QQ 与 Discord。
 
-## 功能总览
+## 核心特性
 
-- `/nai` 指令发起图片生成，支持中文/英文冒号的 `Key:<Value>` 参数格式。
-- **`/nainl` 自然语言生图**：支持任意语言的自然语言描述，自动转换为标准参数格式。
-- 参数解析内建默认值、范围校验与角色定位、福瑞等高级开关。
-- 支持底图（Image2Image）、角色参考、角色分区（最多 5 角色）。
-- 请求进入异步队列顺序执行，每次生成之间随机延迟 3~5 秒。
-- 用户白名单 + 每日限额控制，数据持久化于插件目录下的 `data/{platform}/whitelist.json`。
-- **群白名单**：仅白名单群 + 白名单用户 + 群内 @ 机器人时才响应，私聊不受影响。
-- `/nai插件重启` 支持热加载 `config.yaml`，无需重启 AstraBot。
+- `/nai` 指令解析 `Key:<Value>` / `Key：<Value>` 参数，自动补空缺项（质量词、负面词条、默认模型等）。
+- `/nainl` 自然语言模式：自动调用 OpenRouter LLM，先判断描述详细度，再扩写/翻译生成标准提示词；支持多语言、角色出处检索、质量词与负面词条覆盖。
+- 未检测到任何键值对时，会提示“全文作为正面词条”并照常生成。
+- 队列串行处理 + 3~5 秒随机延迟，降低 NovelAI 官方限流风险。
+- 针对 QQ / Discord 划分独立的用户白名单、每日限额、数据存储目录；群白名单仅在 QQ 生效。
+- `/nai插件重启` 热加载配置文件，无需重启 AstraBot。
+- `/naihelp` 提供完整参数模板，便于用户复制填写。
 
-## 使用
+更多面向终端用户的说明，请分别查看 `HowToUse_QQ.md` 与 `HowToUse_Discord.md`。
 
-根据部署平台选择参考对应说明：
+## 快速上手
 
-- QQ 平台说明：`HowToUse_QQ.md`
-- Discord 平台说明：`HowToUse_Discord.md`
+### 1. 安装依赖
 
-它们分别介绍 Slash 命令、参数格式、白名单操作等细节，便于不同平台的用户快速上手。
-
-## 安装与配置
-
-1. 安装依赖：
-
-   ```bash
-   pip install -r AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/requirements.txt
-   ```
-
-2. 首次运行插件若检测不到配置文件，会自动在插件目录生成模板；也可手动编辑：
-
-   `AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/config.yaml`
-
-   ```yaml
-   # NovelAI 插件配置模板
-   nai_token: "your_novelai_token"
-   proxy: "http://127.0.0.1:7890"      # 可选
-   default_model: "nai-diffusion-4-5-curated"
-   image_save_path: "C:/Absolute/Path/To/astrbot_plugin_novelai_img_generation/outputs"
-   preset_uc: "lowres, bad anatomy, bad hands, worst quality, jpeg artifacts"
-   quality_words: "best quality, masterpiece"
-   default_daily_limit: 10
-   admin_qq_list:
-     - "12345678"
-   ```
-
-   - `nai_token`：NovelAI 官网获取的 Bearer Token。
-   - `proxy`：可选代理，留空则直连。
-   - `default_model`：默认生成模型，可被指令覆盖。
-   - `image_save_path`：生成结果保存路径（必须为绝对路径）。
-   - `preset_uc`：当指令里未填写“负面词条”时，使用的默认负面提示词；留空则回退到内置 Heavy 预设。
-   - `quality_words`：当主提示词中缺少 `best quality` 或 `masterpiece` 时自动追加的质量词列表。
-   - `admin_qq_list`：可执行管理命令的 QQ 号。
-   - `nl_settings`：自然语言处理设置（可选，用于启用 `/nainl` 功能），详见下方说明。
-
-3. 插件同样会在缺少文件时自动创建各平台的白名单文件；你也可以预置内容，结构如下：
-   - QQ 平台：`AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/data/aiocqhttp/whitelist.json`
-   - Discord 平台：`AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/data/discord/whitelist.json`
-
-   ```json
-   {
-     "users": {
-       "12345678": {
-         "daily_limit": 10,
-         "remaining": 10,
-         "last_reset": "2025-11-07",
-         "last_used_at": null,
-         "nickname": "示例用户"
-       }
-     },
-     "groups": {
-       "123456789": {
-         "name": "示例测试群"
-       }
-     }
-   }
-   ```
-
-   群白名单为空时，群聊中的 `/nai` 请求将全部忽略。
-
-## 指令 `/nai`
-
-在群聊需先 `@机器人`，并保证群号与发起者都在白名单；私聊无须 @。
-
-示例：
-
-```
-+/nai 正面词条:<masterpiece, best quality> 负面词条:<lowres> 分辨率:<竖图>
-     步数:<24> 是否有福瑞:<否>
+```bash
+pip install -r AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/requirements.txt
 ```
 
-要点：
+### 2. 启动
 
-- 支持 `Key:<Value>` 与 `Key：<Value>`（中文冒号）。
-- 参数间可用空格或换行分隔，值必须放在尖括号中。
-- 若消息携带多张图片，可用顺序编号引用，如 `底图:<1>`。
-- 插件检测参数合法性并给出默认值；解析失败将返回具体错误（私聊可见）。
+- 直接运行 `AstrBot/start_astrbot.bat`（自动激活 `astrbot` 环境并执行 `uv run main.py`）。
+- 首次加载插件时，会在 `AstrBot/data/plugins/astrbot_plugin_novelai_img_generation/` 下自动生成 `config.yaml` 及各平台白名单模板。
 
-### 支持参数一览
+### 3. 配置 `config.yaml`
 
-| 参数 | 说明 | 默认值 / 限制 |
-| --- | --- | --- |
-| 正面词条 | **必填**，NovelAI 提示词 | 无默认，缺失报错 |
-| 负面词条 | NovelAI 负面提示词 | Heavy 预设 |
-| 是否有福瑞 | `是/否`，为“是”时自动添加 `fur dataset` | 否 |
-| 添加质量词 | `是/否`，附加模型质量标签 | 否 |
-| 底图 | 图生图参考图（序号） | 空 |
-| 底图重绘强度 | 0~1 | 0.7 |
-| 底图加噪强度 | 0~0.99 | 0 |
-| 分辨率 | `竖图/横图/方图` | 竖图（832x1216） |
-| 步数 | ≤28 的整数 | 28 |
-| 指导系数 | 0~10 | 5 |
-| 重采样系数 | 0~1 | 0 |
-| 种子 | 整数；缺省随机 | 随机 |
-| 采样器 | `k_euler`、`k_dpmpp_2m` 等 | `k_euler_ancestral` |
-| 角色是否分区 | `是/否`，开启角色定位 | 若 ≤1 角色则强制否 |
-| 角色{n}正面词条 | 角色提示词（最多 5 角色） | - |
-| 角色{n}负面词条 | 角色负面提示词 | 空 |
-| 角色{n}位置 | A1~E5 网格坐标 | 默认 C3 |
-| 角色参考 | 参考图序号 | 空（若有底图则忽略） |
-| 角色参考强度 | 0~1 | 1 |
-| 是否注意原画风 | `是/否` | 否 |
-| 模型 | 可覆盖默认模型 | `config.yaml` 中设置 |
-
-## 指令 `/nainl`（自然语言生图）
-
-`/nainl` 允许用户使用自然语言描述图像需求，插件会自动调用大语言模型（LLM）将描述转换为标准的 `/nai` 参数格式，然后复用现有的生图流程。
-
-### 功能特点
-
-- **多语言支持**：支持任意语言的自然语言输入（中文、英文、日文等）。
-- **智能判断**：自动判断描述详细度，选择“扩写”或“翻译扩展”模板。
-- **配置覆盖**：支持为 `/nainl` 单独配置质量词和负面词条覆盖。
-- **可扩展架构**：LLM 客户端采用抽象接口设计，便于后续接入其他 API 供应商。
-
-### 配置要求
-
-在 `config.yaml` 中添加 `nl_settings` 配置节（用于启用 `/nainl` 功能）：
+示例（默认模板片段）：
 
 ```yaml
+nai_token: "your_novelai_token"
+proxy: "http://127.0.0.1:7890"
+default_model: "nai-diffusion-4-5-curated"
+image_save_path: "D:/NovelaiOutputs"
+preset_uc: "lowres, bad anatomy, bad hands, worst quality, jpeg artifacts"
+quality_words: "best quality, masterpiece"
+default_daily_limit: 10
+admin_qq_list: []
+
 nl_settings:
-  # 质量词覆盖（为空则使用全局 quality_words）
   quality_words_override: ""
-  # 负面词条覆盖（为空则使用全局 preset_uc）
   negative_preset_override: ""
-  # LLM 提供商，目前支持 openrouter
   llm_provider: "openrouter"
-  # OpenRouter API 配置
   openrouter:
-    # API Key（必填，从 https://openrouter.ai 获取）
-    api_key: "your_openrouter_api_key"
-    # 使用的模型列表（按优先级排序，会依次尝试）
+    api_key: "sk-..."
     models:
-      - "openai/gpt-4o-mini"
-      - "anthropic/claude-3-haiku"
-    # API 超时时间（秒）
-    timeout: 30
-  # 提示词模板（可选，使用默认模板时可省略）
-  prompt_templates:
-    detail_check: |
-      请判断以下用户描述是否足够详细...
-    expand: |
-      你是一个专业的AI图像生成提示词助手...
-    translate: |
-      你是一个专业的AI图像生成提示词助手...
+      - "openai/gpt-5-mini:online"
+      - "moonshotai/kimi-k2-thinking:online"
+      - "openai/gpt-4o-mini:online"
+    timeout: 120
+    http_referer: ""
+    x_title: ""
 ```
 
-### 使用示例
+> **提示**：
+> - `image_save_path` 必须是绝对路径，插件会在其中按日期保存图片。
+> - `admin_qq_list` 为可以执行管理命令的账号；Discord 上仍需手动赋权 Slash 命令。
+> - `nl_settings` 为空则 `/nainl` 功能禁用；填写后自动注册并启用自然语言模式。
 
+### 4. 白名单文件
+
+- QQ：`data/aiocqhttp/whitelist.json`
+- Discord：`data/discord/whitelist.json`
+
+结构示例：
+
+```json
+{
+  "users": {
+    "12345678": {
+      "daily_limit": 10,
+      "remaining": 10,
+      "last_reset": "2025-11-07",
+      "last_used_at": null,
+      "nickname": "示例用户"
+    }
+  },
+  "groups": {
+    "123456789": {
+      "name": "示例群"
+    }
+  }
+}
 ```
-/nainl 一个穿着蓝色连衣裙的长发少女，站在樱花树下，阳光透过树叶洒在她身上
-```
 
-插件会：
-1. 调用 LLM 判断描述详细度
-2. 根据详细度选择模板（扩写或翻译扩展）
-3. 将自然语言转换为标准参数格式
-4. 应用配置的质量词/负面词条覆盖（如果有）
-5. 复用 `/nai` 的生图流程
+缺失文件会在启动时自动补齐。
 
-### 注意事项
+## 指令速览
 
-- `/nainl` 功能需要正确配置 `nl_settings` 才能使用，否则会提示功能未启用。
-- LLM API 调用会产生额外费用，请根据 OpenRouter 的定价合理使用。
-- 如果 LLM 返回的参数格式不正确，插件会尝试清理提取，失败时会返回错误信息。
-- 配置修改后需要执行 `/nai插件重启` 才能生效。
+| 指令 | 适用平台 | 说明 |
+| --- | --- | --- |
+| `/nai ...` | QQ / Discord | 标准文本参数接口。QQ 群聊无需再 @ 机器人。 |
+| `/nainl ...` | QQ / Discord | 自然语言转标准提示词；发送后会提示“自然语言交由 LLM 分析中，请稍后~”。 |
+| `/naihelp` | QQ / Discord | 返回完整参数模板与说明。 |
+| `/nai白名单 添加/删除/限额` | QQ（中文） | 用户白名单与限额管理。 |
+| `/nai群白名单 ...` | QQ | 群白名单管理。被删除或未授权的群请求将完全静默。 |
+| `/nai_whitelist_add` / `/nai_whitelist_remove` | Discord | Slash 形式的白名单管理。 |
+| `/nai插件重启` | QQ / Discord | 重新读取 `config.yaml` 与白名单。 |
 
-## 管理命令一览
+## 指令细节
 
-仅管理员（私聊或在白名单群内）可用。
+### `/nai`
 
-### 用户白名单
-- `/nai白名单 添加 <QQ|@某人> [昵称]`
-- `/nai白名单 删除 <QQ|@某人>`
-- `/nai限额 设置 <QQ|@某人> <次数> [昵称]`
+- 支持所有 `Key:<Value>` / `Key：<Value>` 格式；如未写任何键值对，会提示“将全文视作正面词条”。
+- 自动补充质量词：若主提示词缺少 `best quality` 和 `masterpiece`，会追加 `config.yaml` 中的 `quality_words`。
+- 负面词条缺省时使用 `preset_uc`；若配置也为空，则回退到内置 Heavy 预设。
+- 角色（最多 5 位）可指定正负面词条、位置（A1~E5）、参考图与权重。
+- 底图与角色参考均引用消息内图片顺序编号。
+- `/naihelp` 会输出所有参数说明，方便复制粘贴。
 
-命令会自动解析消息中的 `@` 或 `昵称(QQ)` 形式，并存储昵称。
+### `/nainl`
 
-### 群白名单
-- `/nai群白名单 添加 [群号|本群] [群名称]`
-  - 在目标群内直接使用 `本群` 可自动抓取群号与群名。
-- `/nai群白名单 删除 [群号|本群]`
+工作流程：
 
-只有当群号与发起者都在白名单时，并且消息中真正 @ 了机器人，群聊请求才会被处理；未满足条件时插件完全静默。
+1. 输出“自然语言交由 LLM 分析中，请稍后~”。
+2. 调用 LLM 判断描述是否详细（超时使用 `nl_settings.openrouter.timeout`）。
+3. 详细描述走“扩写模板”，简要描述走“翻译扩展模板”。
+4. 模板会先识别有无作品出处的角色名：若存在，将自动查询官方英文名及 danbooru 标准 tag，并在提示词中使用标准写法。
+5. 生成的正面词条会再检查质量词、负面词条是否需要覆盖。
+6. 最终参数走与 `/nai` 一致的流程，并在完成时提示使用了哪一个 LLM 模型。
 
-### 软重启
-- `/nai插件重启`
-  - 重新载入 `config.yaml`，刷新默认模型、限额、管理员等配置。
+参数补充：
 
-## 队列与限额机制
+- 可额外写 `是否自动添加质量词:<否>` 切换质量词补全策略。
+- 当自然语言中提供了键值对（如 `正面词条:<...>`），仍然会先交由 LLM 重新生成标准提示词。
 
-- 所有请求进入异步队列；插入 3~5 秒随机延迟，降低 NovelAI 限流风险。
-- 每日限额随系统日期变化自动重置；也可以手动通过命令调整。
-- 队列处理成功后会 @ 调用者并附图返回；失败则在同会话中回复错误。
+## 队列、限额与输出
 
-## 私聊支持
-
-私聊中 `/nai` 指令不受群白名单限制，仍然需要用户在白名单且额度充足。参数校验、队列处理流程与群聊一致。
+- 所有请求进入队列按序执行，每次加入 3~5 秒随机延迟。
+- 每个用户每天有独立计数，跨平台互不影响；管理员可随时调整剩余额度。
+- 生成成功后会将图片保存到 `image_save_path/{date}/`，并在会话中附带模型、种子与 LLM 名称。
 
 ## 常见问题
 
-- **没有响应**：确认群号已在白名单内、用户也在白名单、消息里确实 @ 了机器人。
-- **提示缺少 `/nai`**：群聊需在 @ 后紧接 `/nai` 指令；私聊直接输入即可。
-- **参数解析失败**：确保 `Key:<Value>` 或 `Key：<Value>`，并在尖括号内填写内容。
-- **修改配置未生效**：执行 `/nai插件重启`，或重启整个平台。
+- **没有响应（QQ）**：确认用户和群都在白名单，且没有触发每日上限；插件现在无需 @ 机器人，直接输入 `/nai` 或 `/nainl` 即可。
+- **Discord Slash 命令未出现**：重新邀请或赋予 `applications.commands` 权限，再执行一次 `start` 后等待机器人自动注册。
+- **LLM 返回空内容**：若日志显示某模型返回空响应，会自动尝试候选列表；可在 `config.yaml` 中调整模型顺序或替换为稳定模型。
+- **配置修改无效**：执行 `/nai插件重启` 或重启 AstraBot 载体。
+- **自动质量词/负面词条不合适**：可在指令里手动覆盖，或在 `nl_settings` 中配置 `quality_words_override` / `negative_preset_override`。
 
-如需进一步定制（例如扩展参数、其他平台支持），欢迎根据源码自行扩展。祝使用愉快！
+## 参考资料
+
+- QQ 使用说明：`HowToUse_QQ.md`
+- Discord 使用说明：`HowToUse_Discord.md`
+- LLM 提示词模板：`config.yaml` → `nl_settings.prompt_templates`
+- API 适配与参数定义：参见 `main.py`、`parser.py`、`nl_processor.py`
+
+欢迎针对更多场景自行扩展，或依据现有架构接入新的平台与模型。祝使用愉快！

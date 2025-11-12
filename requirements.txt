@@ -1,3 +1,10 @@
+# NovelAI 图片生成插件依赖
+
+# HTTP 客户端（用于 NovelAI API 和 OpenRouter LLM API）
 aiohttp>=3.9.0
+
+# 图像处理库（用于图片格式转换、尺寸调整等）
 Pillow>=10.0.0
+
+# YAML 配置文件解析
 PyYAML>=6.0.0

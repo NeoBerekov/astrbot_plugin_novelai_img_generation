@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import base64 as b64
+import io
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+from PIL import Image as PILImage
+
+try:
+    import discord  # type: ignore
+except ImportError:
+    discord = None
 
 import importlib
 import json
@@ -23,10 +32,16 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Image, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.utils.session_waiter import SessionFilter, session_waiter
 
 from .access_control import AccessControl
 from .constants import MODELS
-from .image_utils import image_to_base64, save_image_from_bytes
+from .image_utils import (
+    image_to_base64,
+    prepare_base_image,
+    prepare_character_reference_image,
+    save_image_from_bytes,
+)
 from .llm_client import LLMError, OpenRouterLLMClient
 from .nai_api import NovelAIAPI, NovelAIAPIError
 from .nl_processor import NLProcessingError, NLProcessor
@@ -69,6 +84,21 @@ class PlatformProfile:
     access_control: AccessControl
     whitelist_path: Path
     use_group_whitelist: bool
+
+
+class _UserImageSessionFilter(SessionFilter):
+    def __init__(self, origin: str, user_id: str, tag: str):
+        self.origin = origin
+        self.user_id = user_id
+        self.session_id = f"{origin}:{user_id}:{tag}"
+
+    def filter(self, event: AstrMessageEvent) -> Optional[str]:
+        if (
+            event.unified_msg_origin == self.origin
+            and event.get_sender_id() == self.user_id
+        ):
+            return self.session_id
+        return None
 
 
 def _load_yaml_config(path: Path) -> dict[str, Any]:
@@ -117,6 +147,47 @@ class NovelAIPlugin(Star):
 
     async def initialize(self):
         await self.request_queue.start()
+
+    async def _get_identity_groups_for_user(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+    ) -> Optional[list[str]]:
+        """仅在 Discord 平台尝试获取用户身份组（角色）名称列表。"""
+        if event.get_platform_name().lower() != "discord" or discord is None:
+            return None
+
+        raw = getattr(event.message_obj, "raw_message", None)
+        guild = None
+        if isinstance(raw, discord.Message):
+            guild = raw.guild
+        elif isinstance(raw, discord.Interaction):
+            guild = raw.guild
+
+        if guild is None:
+            return None
+
+        try:
+            discord_user_id = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        member = guild.get_member(discord_user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(discord_user_id)
+            except Exception:
+                member = None
+        if member is None or not hasattr(member, "roles"):
+            return None
+
+        roles = []
+        for role in member.roles:
+            if role and role.name:
+                if role.name == "@everyone":
+                    continue
+                roles.append(role.name)
+        return roles or ["@everyone"]
 
     async def terminate(self):
         await self.request_queue.stop()
@@ -200,6 +271,7 @@ class NovelAIPlugin(Star):
         access_control = profile.access_control
 
         is_group = self._is_group_message(event)
+        platform_name = event.get_platform_name().lower()
         group_id = event.get_group_id() if is_group else ""
 
         if is_group and profile.use_group_whitelist:
@@ -207,8 +279,17 @@ class NovelAIPlugin(Star):
                 return
 
         command_text = self._extract_command_text(event)
-        if not command_text and event.get_platform_name().lower() == "discord":
-            command_text = self._extract_discord_command_text(event)
+        is_discord = event.get_platform_name().lower() == "discord"
+        
+        # 对于 Discord slash 命令，直接提取命令文本并添加 /nai 前缀
+        if is_discord:
+            discord_text = self._extract_discord_command_text(event)
+            if discord_text:
+                command_text = f"/nai {discord_text}"
+            elif not command_text:
+                command_text = ""
+        elif not command_text:
+            command_text = ""
 
         if not command_text:
             if not is_group:
@@ -218,21 +299,9 @@ class NovelAIPlugin(Star):
         try:
             parsed = parse_generation_message(command_text)
         except ParseError as exc:
-            if event.get_platform_name().lower() == "discord" and hasattr(event.message_obj, "raw_message"):
-                raw = event.message_obj.raw_message
-                cleaned = self._extract_discord_command_text(event)
-                if cleaned:
-                    try:
-                        parsed = parse_generation_message(f"/nai {cleaned}")
-                    except ParseError:
-                        yield event.plain_result(str(exc))
-                        return
-                else:
-                    yield event.plain_result(str(exc))
-                    return
-            else:
+            if not is_group:
                 yield event.plain_result(str(exc))
-                return
+            return
 
         model = parsed.model_name or self.config.default_model
         if model not in MODELS:
@@ -241,10 +310,16 @@ class NovelAIPlugin(Star):
             return
 
         user_id = event.get_sender_id()
+        
+        # Discord 平台：检查并更新身份组信息和使用上限
+        if platform_name == "discord":
+            await self._check_and_update_identity_groups(event, user_id, access_control)
+        
         user_allowed = await access_control.check_permission(user_id)
         if not user_allowed:
             if not is_group:
-                yield event.plain_result("您不在白名单中")
+                msg = "请联系管理员添加白名单" if platform_name == "discord" else "您不在白名单中"
+                yield event.plain_result(msg)
             return
 
         if not await access_control.check_quota(user_id):
@@ -253,7 +328,7 @@ class NovelAIPlugin(Star):
             return
 
         try:
-            base_image, character_reference = await self._extract_images(event, parsed)
+            base_image, character_reference = await self._prepare_images(event, parsed)
         except ValueError as exc:
             if not is_group:
                 yield event.plain_result(str(exc))
@@ -507,6 +582,48 @@ class NovelAIPlugin(Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"撤回消息失败: {exc}")
 
+    def _classify_discord_image_field(self, value: Optional[str]) -> str:
+        if value is None:
+            return "unset"
+        text = str(value).strip().lower()
+        truthy = {"是", "true", "1", "yes", "y"}
+        falsy = {"否", "false", "0", "no", "n"}
+        if text in truthy:
+            return "request"
+        if text in falsy:
+            return "skip"
+        return "value"
+
+    async def _prepare_images(
+        self,
+        event: AstrMessageEvent,
+        parsed: ParsedParams,
+    ) -> tuple[Optional[str], Optional[str]]:
+        platform = event.get_platform_name().lower()
+        if platform != "discord":
+            return await self._extract_images(event, parsed)
+
+        base_state = self._classify_discord_image_field(parsed.base_image)
+        ref_state = self._classify_discord_image_field(parsed.character_reference)
+
+        if base_state in {"request", "skip"}:
+            parsed.base_image = None
+        if ref_state in {"request", "skip"}:
+            parsed.character_reference = None
+
+        if base_state == "request" and ref_state == "request":
+            raise ValueError("Discord 暂不支持同时开启底图与角色参考，请分两次操作。")
+
+        if base_state == "request":
+            base_image = await self._await_discord_image(event, "底图", "base")
+            return base_image, None
+
+        if ref_state == "request":
+            character_reference = await self._await_discord_image(event, "角色参考图", "ref")
+            return None, character_reference
+
+        return await self._extract_images(event, parsed)
+
     async def _extract_images(
         self,
         event: AstrMessageEvent,
@@ -525,16 +642,72 @@ class NovelAIPlugin(Star):
             target = image_map.get(parsed.base_image.strip())
             if not target:
                 raise ValueError("未找到指定的底图，请确认图片编号")
-            base_image_data = await self._image_component_to_base64(target)
+            base_image_data = await self._prepare_base_image_from_component(target)
 
         character_reference_data = None
         if parsed.character_reference:
             target = image_map.get(parsed.character_reference.strip())
             if not target:
                 raise ValueError("未找到指定的角色参考图，请确认图片编号")
-            character_reference_data = await self._image_component_to_base64(target)
+            character_reference_data = await self._prepare_character_reference_from_component(target)
 
         return base_image_data, character_reference_data
+
+    async def _await_discord_image(
+        self,
+        event: AstrMessageEvent,
+        prompt_label: str,
+        session_tag: str,
+    ) -> str:
+        chain = MessageChain()
+        chain.chain.append(
+            At(
+                name=event.get_sender_name() or event.get_sender_id(),
+                qq=event.get_sender_id(),
+            )
+        )
+        chain.chain.append(Plain(f"请发送{prompt_label}（60 秒内有效）。"))
+        await event.send(chain)
+
+        result: dict[str, Optional[str]] = {"image": None}
+        session_filter = _UserImageSessionFilter(
+            origin=event.unified_msg_origin,
+            user_id=event.get_sender_id(),
+            tag=session_tag,
+        )
+
+        @session_waiter(timeout=60)
+        async def image_waiter(controller, next_event: AstrMessageEvent):
+            images = [comp for comp in next_event.get_messages() if isinstance(comp, Image)]
+            if not images:
+                reminder = MessageChain()
+                reminder.chain.append(
+                    At(
+                        name=next_event.get_sender_name() or next_event.get_sender_id(),
+                        qq=next_event.get_sender_id(),
+                    )
+                )
+                reminder.chain.append(Plain(f"未检测到图片，请重新发送{prompt_label}。"))
+                await next_event.send(reminder)
+                controller.keep(timeout=60, reset_timeout=True)
+                return
+            # 根据session_tag决定使用哪个预处理函数
+            if session_tag == "base":
+                result["image"] = await self._prepare_base_image_from_component(images[0])
+            elif session_tag == "ref":
+                result["image"] = await self._prepare_character_reference_from_component(images[0])
+            else:
+                result["image"] = await self._image_component_to_base64(images[0])
+            controller.stop()
+
+        try:
+            await image_waiter(event, session_filter=session_filter)
+        except TimeoutError:
+            raise ValueError(f"等待{prompt_label}超时，请重新发送指令。")
+
+        if not result["image"]:
+            raise ValueError(f"{prompt_label}获取失败，请重试。")
+        return result["image"]
 
     async def _image_component_to_base64(self, image: Image) -> str:
         if image.file and image.file.startswith("base64://"):
@@ -546,6 +719,36 @@ class NovelAIPlugin(Star):
             return image_to_base64(image.file)
         file_path = await image.convert_to_file_path()
         return image_to_base64(file_path)
+
+    async def _prepare_base_image_from_component(self, image: Image) -> str:
+        """预处理底图组件，转换为base64。"""
+        if image.file and image.file.startswith("base64://"):
+            # 如果是base64，需要先解码再处理
+            img_bytes = b64.b64decode(image.file.removeprefix("base64://"))
+            img = PILImage.open(io.BytesIO(img_bytes))
+            return prepare_base_image(img)
+        if image.file and image.file.startswith("file:///"):
+            path = image.file.replace("file:///", "")
+            return prepare_base_image(path)
+        if image.file and os.path.exists(image.file):
+            return prepare_base_image(image.file)
+        file_path = await image.convert_to_file_path()
+        return prepare_base_image(file_path)
+
+    async def _prepare_character_reference_from_component(self, image: Image) -> str:
+        """预处理角色参考图组件，转换为base64。"""
+        if image.file and image.file.startswith("base64://"):
+            # 如果是base64，需要先解码再处理
+            img_bytes = b64.b64decode(image.file.removeprefix("base64://"))
+            img = PILImage.open(io.BytesIO(img_bytes))
+            return prepare_character_reference_image(img)
+        if image.file and image.file.startswith("file:///"):
+            path = image.file.replace("file:///", "")
+            return prepare_character_reference_image(path)
+        if image.file and os.path.exists(image.file):
+            return prepare_character_reference_image(image.file)
+        file_path = await image.convert_to_file_path()
+        return prepare_character_reference_image(file_path)
 
     def _store_image(self, image_bytes: bytes, model: str, seed: int) -> str:
         save_dir = Path(self.config.image_save_path)
@@ -572,9 +775,20 @@ class NovelAIPlugin(Star):
             yield event.plain_result("请提供要添加的QQ号或@目标")
             return
         nick = nickname.strip() or default_name
-        user = await access_control.add_to_whitelist(qq, nickname=nick)
+        await access_control.record_admin(event.get_sender_id(), event.get_sender_name())
+        identity_groups = await self._get_identity_groups_for_user(event, qq)
+        user = await access_control.add_to_whitelist(
+            qq,
+            nickname=nick,
+            identity_groups=identity_groups,
+        )
         yield event.plain_result(
-            f"已添加 {qq} 至白名单，昵称：{user.nickname or '未设'}，今日剩余 {user.remaining}/{user.daily_limit} 次",
+            f"已添加 {qq} 至白名单，昵称：{user.nickname or '未设'}，今日剩余 {user.remaining}/{user.daily_limit} 次"
+            + (
+                f"，身份组：{', '.join(identity_groups)}"
+                if identity_groups
+                else ""
+            ),
         )
 
     @whitelist_group.command("删除")
@@ -587,6 +801,7 @@ class NovelAIPlugin(Star):
         if not qq:
             yield event.plain_result("请提供要删除的QQ号或@目标")
             return
+        await access_control.record_admin(event.get_sender_id(), event.get_sender_name())
         removed = await access_control.remove_from_whitelist(qq)
         if removed:
             yield event.plain_result(f"已从白名单移除 {qq}")
@@ -614,6 +829,7 @@ class NovelAIPlugin(Star):
             return
         try:
             nick = nickname.strip() or default_name
+            await access_control.record_admin(event.get_sender_id(), event.get_sender_name())
             user = await access_control.set_quota(qq, limit_value, nickname=nick)
         except ValueError as exc:
             yield event.plain_result(str(exc))
@@ -648,6 +864,7 @@ class NovelAIPlugin(Star):
         if not group_id:
             yield event.plain_result("请提供群号，或在目标群内使用该命令")
             return
+        await access_control.record_admin(event.get_sender_id(), event.get_sender_name())
         entry = await access_control.add_group(group_id, group_name)
         yield event.plain_result(
             f"已添加群 {group_id} 至白名单，名称：{entry.get('name') or '未设'}",
@@ -663,6 +880,7 @@ class NovelAIPlugin(Star):
         if not group_id:
             yield event.plain_result("请提供群号，或在目标群内使用该命令")
             return
+        await access_control.record_admin(event.get_sender_id(), event.get_sender_name())
         removed = await access_control.remove_group(group_id)
         if removed:
             yield event.plain_result(f"已从群白名单移除 {group_id}")
@@ -678,6 +896,25 @@ class NovelAIPlugin(Star):
     async def whitelist_remove_en(self, event: AstrMessageEvent, target: str = ""):
         async for result in self.whitelist_remove(event, target):
             yield result
+
+    @filter.command("naiimportusers")
+    async def import_users(self, event: AstrMessageEvent):
+        """导入 Discord 服务器用户到白名单，并根据身份组设置限额。"""
+        platform = event.get_platform_name().lower()
+        if platform != "discord":
+            yield event.plain_result("此命令仅支持 Discord 平台")
+            return
+
+        if not self._is_admin(event):
+            yield event.plain_result("您不是管理员，无法修改白名单")
+            return
+
+        try:
+            result = await self._import_discord_users(event)
+            yield event.plain_result(result)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"导入用户失败: {exc}", exc_info=True)
+            yield event.plain_result(f"导入用户失败: {exc}")
 
     @filter.command("naihelp")
     async def nai_help(self, event: AstrMessageEvent):
@@ -722,6 +959,7 @@ class NovelAIPlugin(Star):
         access_control = profile.access_control
 
         is_group = self._is_group_message(event)
+        platform_name = event.get_platform_name().lower()
         group_id = event.get_group_id() if is_group else ""
 
         if is_group and profile.use_group_whitelist:
@@ -732,7 +970,8 @@ class NovelAIPlugin(Star):
         user_allowed = await access_control.check_permission(user_id)
         if not user_allowed:
             if not is_group:
-                yield event.plain_result("您不在白名单中")
+                msg = "请联系管理员添加白名单" if platform_name == "discord" else "您不在白名单中"
+                yield event.plain_result(msg)
             return
 
         if not await access_control.check_quota(user_id):
@@ -880,7 +1119,7 @@ class NovelAIPlugin(Star):
             return
 
         try:
-            base_image, character_reference = await self._extract_images(event, parsed)
+            base_image, character_reference = await self._prepare_images(event, parsed)
         except ValueError as exc:
             if not is_group:
                 yield event.plain_result(str(exc))
@@ -1084,7 +1323,8 @@ class NovelAIPlugin(Star):
                 "123456789": {
                     "name": "示例测试群"
                 }
-            }
+            },
+            "admin": {}
         }
         
         for platform in platforms:
@@ -1119,7 +1359,7 @@ class NovelAIPlugin(Star):
         whitelist_path = platform_dir / "whitelist.json"
         if not whitelist_path.exists():
             whitelist_path.write_text(
-                json.dumps({"users": {}, "groups": {}}, ensure_ascii=False, indent=2),
+                json.dumps({"users": {}, "groups": {}, "admin": {}}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         access_control = AccessControl(str(whitelist_path), self.config.default_daily_limit)
@@ -1132,6 +1372,279 @@ class NovelAIPlugin(Star):
         )
         self.platform_profiles[key] = profile
         return profile
+
+    async def _import_discord_users(self, event: AstrMessageEvent) -> str:
+        """导入 Discord 服务器用户到白名单，并根据身份组设置限额。"""
+        raw = getattr(event.message_obj, "raw_message", None)
+        if not raw:
+            return "无法获取 Discord 服务器信息"
+
+        guild = None
+        if isinstance(raw, discord.Message):
+            guild = raw.guild
+        elif isinstance(raw, discord.Interaction):
+            guild = raw.guild
+
+        if guild is None:
+            return "无法获取 Discord 服务器信息"
+
+        guild_id = str(guild.id)
+        profile = self._get_platform_profile(event)
+        access_control = profile.access_control
+
+        # 获取或创建 role.json
+        guild_dir = self.data_dir / "discord" / guild_id
+        guild_dir.mkdir(parents=True, exist_ok=True)
+        role_json_path = guild_dir / "role.json"
+
+        # 读取或创建 role.json
+        role_config = await self._ensure_role_json(role_json_path, guild)
+
+        # 获取服务器所有成员
+        try:
+            members = list(guild.members)
+            # 如果成员列表不完整，尝试获取所有成员
+            if len(members) < guild.member_count:
+                # 尝试分块获取所有成员
+                try:
+                    await guild.chunk()
+                    members = list(guild.members)
+                except Exception:  # noqa: BLE001
+                    # 如果 chunk 失败，使用当前成员列表
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"获取服务器成员失败，使用当前成员列表: {exc}")
+            members = list(guild.members)
+
+        added_count = 0
+        updated_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        # 扫描所有用户
+        for member in members:
+            if member.bot:
+                continue
+
+            user_id = str(member.id)
+            # 检查用户是否在白名单中
+            async with access_control._lock:
+                user_quota = access_control._get_user(user_id)
+
+            # 获取用户的身份组ID列表（排除 @everyone）
+            user_role_ids = []
+            for role in member.roles:
+                if role and role.id != guild.id:  # 排除 @everyone
+                    user_role_ids.append(str(role.id))
+
+            # 根据身份组设置使用上限和刷新间隔
+            # 遍历所有身份组，找到使用上限最高的身份组配置
+            daily_limit = 3  # 默认值
+            refresh_interval = 1440  # 默认值
+            max_daily_limit = 3  # 用于记录最高使用上限
+
+            for role_id in user_role_ids:
+                role_info = role_config.get("roles", {}).get(role_id)
+                if role_info:
+                    role_daily_limit = role_info.get("default_daily_limit", 3)
+                    role_refresh_interval = role_info.get("refresh_interval_minutes", 1440)
+                    # 如果这个身份组的使用上限更高，则使用这个身份组的配置
+                    if role_daily_limit > max_daily_limit:
+                        max_daily_limit = role_daily_limit
+                        daily_limit = role_daily_limit
+                        refresh_interval = role_refresh_interval
+
+            try:
+                if not user_quota:
+                    # 用户不在白名单中，添加到白名单
+                    await access_control.set_quota(
+                        user_id,
+                        daily_limit,
+                        nickname=member.display_name or member.name,
+                        identity_groups=user_role_ids if user_role_ids else None,
+                        refresh_interval_minutes=refresh_interval,
+                    )
+                    added_count += 1
+                else:
+                    # 用户已在白名单中，检查是否需要更新
+                    user_data = user_quota.to_dict()
+                    current_identity_groups = user_data.get("identity_groups")
+                    needs_update = False
+
+                    if not current_identity_groups:
+                        # 没有身份组字段，需要更新
+                        needs_update = True
+                    elif set(current_identity_groups) != set(user_role_ids):
+                        # 身份组不匹配，需要更新
+                        needs_update = True
+
+                    if needs_update:
+                        # 更新用户信息
+                        await access_control.set_quota(
+                            user_id,
+                            daily_limit,
+                            nickname=user_data.get("nickname") or member.display_name or member.name,
+                            identity_groups=user_role_ids if user_role_ids else None,
+                            refresh_interval_minutes=refresh_interval,
+                        )
+                        # 恢复满使用次数
+                        async with access_control._lock:
+                            user_quota = access_control._get_user(user_id)
+                            if user_quota:
+                                user_quota.remaining = daily_limit
+                                access_control._set_user(user_quota)
+                                access_control._save_locked()
+                        updated_count += 1
+                    else:
+                        # 身份组信息已是最新，跳过
+                        skipped_count += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"处理用户 {user_id} 失败: {exc}")
+                error_count += 1
+
+        return (
+            f"导入完成。\n"
+            f"已添加: {added_count} 个用户\n"
+            f"已更新: {updated_count} 个用户\n"
+            f"已跳过: {skipped_count} 个用户（身份组信息已是最新）\n"
+            f"错误: {error_count} 个用户"
+        )
+
+    async def _check_and_update_identity_groups(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        access_control: AccessControl,
+    ) -> None:
+        """检查并更新用户的身份组信息和使用上限（Discord平台）。"""
+        raw = getattr(event.message_obj, "raw_message", None)
+        if not raw:
+            return
+
+        guild = None
+        if isinstance(raw, discord.Message):
+            guild = raw.guild
+        elif isinstance(raw, discord.Interaction):
+            guild = raw.guild
+
+        if guild is None:
+            return
+
+        guild_id = str(guild.id)
+        guild_dir = self.data_dir / "discord" / guild_id
+        role_json_path = guild_dir / "role.json"
+
+        # 如果 role.json 不存在，跳过检查
+        if not role_json_path.exists():
+            return
+
+        # 读取 role.json
+        try:
+            with open(role_json_path, "r", encoding="utf-8") as f:
+                role_config = json.load(f)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"读取 role.json 失败: {exc}")
+            return
+
+        # 获取用户真实身份组ID列表
+        try:
+            member = guild.get_member(int(user_id))
+            if member is None:
+                try:
+                    member = await guild.fetch_member(int(user_id))
+                except Exception:  # noqa: BLE001
+                    return
+        except (ValueError, TypeError):
+            return
+
+        if member is None or not hasattr(member, "roles"):
+            return
+
+        # 获取用户真实身份组ID列表（排除 @everyone）
+        real_role_ids = []
+        for role in member.roles:
+            if role and role.id != guild.id:  # 排除 @everyone
+                real_role_ids.append(str(role.id))
+
+        # 获取白名单中记录的用户信息
+        async with access_control._lock:
+            user_quota = access_control._get_user(user_id)
+
+        if not user_quota:
+            return
+
+        recorded_role_ids = user_quota.identity_groups or []
+        recorded_daily_limit = user_quota.daily_limit
+
+        # 根据真实身份组计算应该的使用上限
+        # 遍历所有身份组，找到使用上限最高的身份组配置
+        expected_daily_limit = 3  # 默认值
+        expected_refresh_interval = 1440  # 默认值
+        max_daily_limit = 3  # 用于记录最高使用上限
+
+        for role_id in real_role_ids:
+            role_info = role_config.get("roles", {}).get(role_id)
+            if role_info:
+                role_daily_limit = role_info.get("default_daily_limit", 3)
+                role_refresh_interval = role_info.get("refresh_interval_minutes", 1440)
+                # 如果这个身份组的使用上限更高，则使用这个身份组的配置
+                if role_daily_limit > max_daily_limit:
+                    max_daily_limit = role_daily_limit
+                    expected_daily_limit = role_daily_limit
+                    expected_refresh_interval = role_refresh_interval
+
+        # 检查是否需要更新：身份组不匹配 或 使用上限不匹配
+        needs_update = False
+        if set(real_role_ids) != set(recorded_role_ids):
+            needs_update = True
+        elif recorded_daily_limit != expected_daily_limit:
+            needs_update = True
+
+        if needs_update:
+            # 更新用户信息
+            await access_control.set_quota(
+                user_id,
+                expected_daily_limit,
+                nickname=user_quota.nickname or member.display_name or member.name,
+                identity_groups=real_role_ids if real_role_ids else None,
+                refresh_interval_minutes=expected_refresh_interval,
+            )
+            # 补满使用限额
+            async with access_control._lock:
+                user_quota = access_control._get_user(user_id)
+                if user_quota:
+                    user_quota.remaining = expected_daily_limit
+                    access_control._set_user(user_quota)
+                    access_control._save_locked()
+            logger.info(f"已更新用户 {user_id} 的身份组信息和使用上限")
+
+    async def _ensure_role_json(self, role_json_path: Path, guild) -> Dict[str, Any]:
+        """确保 role.json 存在，如果不存在则创建并写入所有身份组。"""
+        if role_json_path.exists():
+            try:
+                with open(role_json_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"读取 role.json 失败，将重新创建: {exc}")
+
+        # 创建新的 role.json
+        roles_data = {}
+        for role in guild.roles:
+            if role.id == guild.id:  # 跳过 @everyone
+                continue
+            roles_data[str(role.id)] = {
+                "name": role.name,
+                "default_daily_limit": 3,
+                "refresh_interval_minutes": 1440,
+            }
+
+        role_config = {"roles": roles_data}
+        role_json_path.write_text(
+            json.dumps(role_config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(f"已创建 role.json: {role_json_path}")
+        return role_config
 
     def _fetch_discord_member_name(self, raw_message, user_id: str) -> Optional[str]:
         if raw_message is None:

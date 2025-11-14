@@ -15,9 +15,11 @@ class UserQuota:
     qq: str
     daily_limit: int
     remaining: int
-    last_reset: str
+    last_reset: str  # ISO 时间戳字符串，例如 "2025-01-15T12:30:45.123456"
     last_used_at: Optional[str] = None
     nickname: Optional[str] = None
+    identity_groups: Optional[list[str]] = None
+    refresh_interval_minutes: Optional[int] = None  # 刷新间隔（分钟），None 表示使用默认的每日刷新
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -26,6 +28,8 @@ class UserQuota:
             "last_reset": self.last_reset,
             "last_used_at": self.last_used_at,
             "nickname": self.nickname,
+            "identity_groups": self.identity_groups,
+            "refresh_interval_minutes": self.refresh_interval_minutes,
         }
 
 
@@ -36,7 +40,7 @@ class AccessControl:
         self.storage_path = storage_path
         self.default_daily_limit = default_daily_limit
         self._lock = asyncio.Lock()
-        self._data: Dict[str, Dict[str, object]] = {"users": {}, "groups": {}}
+        self._data: Dict[str, Dict[str, object]] = {"users": {}, "groups": {}, "admin": {}}
         self._load()
 
     def _load(self) -> None:
@@ -51,6 +55,7 @@ class AccessControl:
             self._data = {"users": {}, "groups": {}}
         self._data.setdefault("users", {})
         self._data.setdefault("groups", {})
+        self._data.setdefault("admin", {})
 
     def _save_locked(self) -> None:
         os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
@@ -60,20 +65,62 @@ class AccessControl:
     def _today(self) -> str:
         return date.today().isoformat()
 
+    def _now(self) -> str:
+        """返回当前时间的 ISO 时间戳字符串。"""
+        return datetime.now().isoformat()
+
     def _get_user(self, qq: str) -> Optional[UserQuota]:
         user = self._data.get("users", {}).get(qq)
         if not user:
             return None
-        return UserQuota(qq=qq, **user)
+        # 兼容旧数据：如果 last_reset 是日期格式（只有日期，没有时间），转换为时间戳
+        last_reset = user.get("last_reset", "")
+        if last_reset and "T" not in last_reset:
+            # 旧格式：只有日期，转换为当天的开始时间戳
+            try:
+                reset_date = datetime.fromisoformat(last_reset).date()
+                last_reset = datetime.combine(reset_date, datetime.min.time()).isoformat()
+            except (ValueError, AttributeError):
+                # 如果解析失败，使用当前时间
+                last_reset = self._now()
+        user_data = user.copy()
+        user_data["last_reset"] = last_reset
+        return UserQuota(qq=qq, **user_data)
 
     def _set_user(self, user: UserQuota) -> None:
         self._data.setdefault("users", {})[user.qq] = user.to_dict()
 
     def _auto_reset_user(self, user: UserQuota) -> UserQuota:
-        today = self._today()
-        if user.last_reset != today:
-            user.last_reset = today
+        """根据刷新间隔自动重置用户的使用次数。"""
+        now = datetime.now()
+        
+        # 解析 last_reset 时间戳
+        try:
+            if "T" in user.last_reset:
+                last_reset_time = datetime.fromisoformat(user.last_reset)
+            else:
+                # 兼容旧格式：只有日期
+                reset_date = datetime.fromisoformat(user.last_reset).date()
+                last_reset_time = datetime.combine(reset_date, datetime.min.time())
+        except (ValueError, AttributeError):
+            # 如果解析失败，重置为当前时间
+            last_reset_time = now
+            user.last_reset = now.isoformat()
+
+        # 计算时间差（分钟）
+        time_diff_minutes = (now - last_reset_time).total_seconds() / 60
+
+        # 确定刷新间隔
+        refresh_interval = user.refresh_interval_minutes
+        if refresh_interval is None:
+            # 默认：每日刷新（1440分钟）
+            refresh_interval = 1440
+
+        # 如果时间差超过刷新间隔，重置使用次数
+        if time_diff_minutes >= refresh_interval:
+            user.last_reset = now.isoformat()
             user.remaining = user.daily_limit
+
         return user
 
     async def check_permission(self, qq: str) -> bool:
@@ -89,6 +136,7 @@ class AccessControl:
         qq: str,
         limit: Optional[int] = None,
         nickname: Optional[str] = None,
+        identity_groups: Optional[list[str]] = None,
     ) -> UserQuota:
         async with self._lock:
             daily_limit = limit or self.default_daily_limit
@@ -96,12 +144,19 @@ class AccessControl:
                 qq=qq,
                 daily_limit=daily_limit,
                 remaining=daily_limit,
-                last_reset=self._today(),
+                last_reset=self._now(),
                 nickname=nickname,
+                identity_groups=identity_groups,
             )
             self._set_user(user)
             self._save_locked()
             return user
+
+    async def record_admin(self, admin_id: str, nickname: Optional[str] = None) -> None:
+        async with self._lock:
+            admin_entry = self._data.setdefault("admin", {})
+            admin_entry[str(admin_id)] = {"昵称": nickname or ""}
+            self._save_locked()
 
     async def remove_from_whitelist(self, qq: str) -> bool:
         async with self._lock:
@@ -138,6 +193,8 @@ class AccessControl:
         qq: str,
         limit: int,
         nickname: Optional[str] = None,
+        identity_groups: Optional[list[str]] = None,
+        refresh_interval_minutes: Optional[int] = None,
     ) -> UserQuota:
         if limit <= 0:
             raise ValueError("每日限额必须大于0")
@@ -148,14 +205,20 @@ class AccessControl:
                     qq=qq,
                     daily_limit=limit,
                     remaining=limit,
-                    last_reset=self._today(),
+                    last_reset=self._now(),
                     nickname=nickname,
+                    identity_groups=identity_groups,
+                    refresh_interval_minutes=refresh_interval_minutes,
                 )
             else:
                 user.daily_limit = limit
                 user.remaining = min(user.remaining, limit)
                 if nickname:
                     user.nickname = nickname
+                if identity_groups is not None:
+                    user.identity_groups = identity_groups
+                if refresh_interval_minutes is not None:
+                    user.refresh_interval_minutes = refresh_interval_minutes
             self._set_user(user)
             self._save_locked()
             return user

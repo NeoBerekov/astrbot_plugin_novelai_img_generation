@@ -301,7 +301,7 @@ class NovelAIPlugin(Star):
         except ParseError as exc:
             if not is_group:
                 yield event.plain_result(str(exc))
-            return
+                return
 
         model = parsed.model_name or self.config.default_model
         if model not in MODELS:
@@ -603,26 +603,40 @@ class NovelAIPlugin(Star):
         if platform != "discord":
             return await self._extract_images(event, parsed)
 
-        base_state = self._classify_discord_image_field(parsed.base_image)
-        ref_state = self._classify_discord_image_field(parsed.character_reference)
+        # Discord 平台统一使用"要求用户后续补充"的逻辑
+        # 注意：需要从 raw_params 中获取原始值，因为 parser.py 可能会将某些值设置为 None
+        raw_base_image = parsed.raw_params.get("底图") if parsed.raw_params else parsed.base_image
+        raw_character_reference = parsed.raw_params.get("角色参考") if parsed.raw_params else parsed.character_reference
+        
+        base_state = self._classify_discord_image_field(raw_base_image)
+        ref_state = self._classify_discord_image_field(raw_character_reference)
 
-        if base_state in {"request", "skip"}:
+        # 如果明确设置为"否"，则跳过
+        if base_state == "skip":
             parsed.base_image = None
-        if ref_state in {"request", "skip"}:
+        if ref_state == "skip":
             parsed.character_reference = None
 
-        if base_state == "request" and ref_state == "request":
+        # 如果两个都要求发送图片，报错
+        # 使用原始值判断，而不是 parsed 中可能被修改的值
+        base_needs_image = raw_base_image is not None and base_state != "skip"
+        ref_needs_image = raw_character_reference is not None and ref_state != "skip"
+        
+        if base_needs_image and ref_needs_image:
             raise ValueError("Discord 暂不支持同时开启底图与角色参考，请分两次操作。")
 
-        if base_state == "request":
+        # 如果要求底图，等待用户发送
+        if base_needs_image:
             base_image = await self._await_discord_image(event, "底图", "base")
             return base_image, None
 
-        if ref_state == "request":
+        # 如果要求角色参考，等待用户发送
+        if ref_needs_image:
             character_reference = await self._await_discord_image(event, "角色参考图", "ref")
             return None, character_reference
 
-        return await self._extract_images(event, parsed)
+        # 都不需要图片，返回 None
+        return None, None
 
     async def _extract_images(
         self,

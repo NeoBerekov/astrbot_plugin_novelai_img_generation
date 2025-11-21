@@ -45,6 +45,8 @@ class AccessControl:
 
     def _load(self) -> None:
         if not os.path.exists(self.storage_path):
+            # 文件不存在，清空内存中的数据并创建新文件
+            self._data = {"users": {}, "groups": {}, "admin": {}}
             os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
             self._save_locked()
             return
@@ -52,10 +54,14 @@ class AccessControl:
             with open(self.storage_path, "r", encoding="utf-8") as f:
                 self._data = json.load(f)
         except json.JSONDecodeError:
-            self._data = {"users": {}, "groups": {}}
+            self._data = {"users": {}, "groups": {}, "admin": {}}
         self._data.setdefault("users", {})
         self._data.setdefault("groups", {})
         self._data.setdefault("admin", {})
+
+    def reload(self) -> None:
+        """重新加载文件数据，用于文件被手动删除或修改后的情况。"""
+        self._load()
 
     def _save_locked(self) -> None:
         os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)

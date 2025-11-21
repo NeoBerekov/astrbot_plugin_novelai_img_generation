@@ -311,16 +311,37 @@ class NovelAIPlugin(Star):
 
         user_id = event.get_sender_id()
         
-        # Discord 平台：检查并更新身份组信息和使用上限
+        # Discord 平台：执行新的白名单检查逻辑
         if platform_name == "discord":
-            await self._check_and_update_identity_groups(event, user_id, access_control)
+            # 重新加载 access_control 以确保数据是最新的
+            access_control.reload()
+            
+            check_result = await self._check_discord_whitelist(event, user_id, access_control)
+            if check_result["status"] == "no_roles":
+                if not is_group:
+                    yield event.plain_result("请先获取身份组")
+                return
+            elif check_result["status"] == "not_in_role_config":
+                if not is_group:
+                    yield event.plain_result(check_result.get("error", "你的身份组不在白名单内，请联系管理员"))
+                return
+            elif check_result["status"] == "needs_recheck":
+                # 身份组已更新，重新加载并重新检查
+                access_control.reload()
+                check_result = await self._check_discord_whitelist(event, user_id, access_control)
+                if check_result["status"] != "ok":
+                    if not is_group:
+                        yield event.plain_result(check_result.get("error", "检查失败"))
+                    return
+            # check_result["status"] == "ok": 继续执行
         
-        user_allowed = await access_control.check_permission(user_id)
-        if not user_allowed:
-            if not is_group:
-                msg = "请联系管理员添加白名单" if platform_name == "discord" else "您不在白名单中"
-                yield event.plain_result(msg)
-            return
+        # 非 Discord 平台或 Discord 平台检查通过后，检查白名单权限
+        if platform_name != "discord":
+            user_allowed = await access_control.check_permission(user_id)
+            if not user_allowed:
+                if not is_group:
+                    yield event.plain_result("您不在白名单中")
+                return
 
         if not await access_control.check_quota(user_id):
             if not is_group:
@@ -1363,14 +1384,24 @@ class NovelAIPlugin(Star):
 
     def _get_platform_profile(self, event: AstrMessageEvent) -> PlatformProfile:
         key = self._get_platform_key(event)
-        profile = self.platform_profiles.get(key)
-        if profile:
-            return profile
-
+        
         # whitelist.json 放在插件文件夹的 data 目录下，按平台分目录
         platform_dir = self.data_dir / key
         platform_dir.mkdir(parents=True, exist_ok=True)
         whitelist_path = platform_dir / "whitelist.json"
+        
+        # 检查缓存中的 profile，但如果文件被删除，需要重新创建 AccessControl
+        profile = self.platform_profiles.get(key)
+        if profile:
+            # 如果文件被手动删除，需要重新创建 AccessControl 实例
+            if not whitelist_path.exists():
+                # 文件不存在，重新创建 AccessControl 实例（会自动清空内存数据）
+                access_control = AccessControl(str(whitelist_path), self.config.default_daily_limit)
+                profile.access_control = access_control
+                profile.whitelist_path = whitelist_path
+            return profile
+
+        # 创建新的 profile
         if not whitelist_path.exists():
             whitelist_path.write_text(
                 json.dumps({"users": {}, "groups": {}, "admin": {}}, ensure_ascii=False, indent=2),
@@ -1440,26 +1471,33 @@ class NovelAIPlugin(Star):
             if member.bot:
                 continue
 
-            user_id = str(member.id)
-            # 检查用户是否在白名单中
-            async with access_control._lock:
-                user_quota = access_control._get_user(user_id)
-
             # 获取用户的身份组ID列表（排除 @everyone）
             user_role_ids = []
             for role in member.roles:
                 if role and role.id != guild.id:  # 排除 @everyone
                     user_role_ids.append(str(role.id))
+            
+            # 只导入有身份组的用户
+            if not user_role_ids:
+                skipped_count += 1
+                continue
+
+            user_id = str(member.id)
+            # 检查用户是否在白名单中
+            async with access_control._lock:
+                user_quota = access_control._get_user(user_id)
 
             # 根据身份组设置使用上限和刷新间隔
-            # 遍历所有身份组，找到使用上限最高的身份组配置
+            # 只考虑在 role.json 中的身份组，找到使用上限最高的身份组配置
             daily_limit = 3  # 默认值
             refresh_interval = 1440  # 默认值
             max_daily_limit = 3  # 用于记录最高使用上限
+            has_role_in_config = False
 
             for role_id in user_role_ids:
                 role_info = role_config.get("roles", {}).get(role_id)
                 if role_info:
+                    has_role_in_config = True
                     role_daily_limit = role_info.get("default_daily_limit", 3)
                     role_refresh_interval = role_info.get("refresh_interval_minutes", 1440)
                     # 如果这个身份组的使用上限更高，则使用这个身份组的配置
@@ -1467,6 +1505,11 @@ class NovelAIPlugin(Star):
                         max_daily_limit = role_daily_limit
                         daily_limit = role_daily_limit
                         refresh_interval = role_refresh_interval
+            
+            # 如果用户没有任何身份组在 role.json 中，跳过（不应该发生，因为前面已经检查了）
+            if not has_role_in_config:
+                skipped_count += 1
+                continue
 
             try:
                 if not user_quota:
@@ -1520,20 +1563,28 @@ class NovelAIPlugin(Star):
             f"导入完成。\n"
             f"已添加: {added_count} 个用户\n"
             f"已更新: {updated_count} 个用户\n"
-            f"已跳过: {skipped_count} 个用户（身份组信息已是最新）\n"
+            f"已跳过: {skipped_count} 个用户（无身份组或身份组信息已是最新）\n"
             f"错误: {error_count} 个用户"
         )
 
-    async def _check_and_update_identity_groups(
+    async def _check_discord_whitelist(
         self,
         event: AstrMessageEvent,
         user_id: str,
         access_control: AccessControl,
-    ) -> None:
-        """检查并更新用户的身份组信息和使用上限（Discord平台）。"""
+    ) -> dict:
+        """
+        检查 Discord 用户的白名单状态（按照新的逻辑）。
+        
+        返回:
+            dict: {
+                "status": "ok" | "no_roles" | "not_in_role_config" | "needs_recheck",
+                "error": str (可选，错误消息)
+            }
+        """
         raw = getattr(event.message_obj, "raw_message", None)
         if not raw:
-            return
+            return {"status": "ok"}  # 没有 raw_message，允许继续
 
         guild = None
         if isinstance(raw, discord.Message):
@@ -1542,15 +1593,15 @@ class NovelAIPlugin(Star):
             guild = raw.guild
 
         if guild is None:
-            return
+            return {"status": "ok"}  # 没有 guild，允许继续
 
         guild_id = str(guild.id)
         guild_dir = self.data_dir / "discord" / guild_id
         role_json_path = guild_dir / "role.json"
 
-        # 如果 role.json 不存在，跳过检查
+        # 如果 role.json 不存在，跳过检查（不要求身份组）
         if not role_json_path.exists():
-            return
+            return {"status": "ok"}
 
         # 读取 role.json
         try:
@@ -1558,7 +1609,7 @@ class NovelAIPlugin(Star):
                 role_config = json.load(f)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"读取 role.json 失败: {exc}")
-            return
+            return {"status": "ok"}  # 读取失败，允许继续（避免误判）
 
         # 获取用户真实身份组ID列表
         try:
@@ -1567,12 +1618,12 @@ class NovelAIPlugin(Star):
                 try:
                     member = await guild.fetch_member(int(user_id))
                 except Exception:  # noqa: BLE001
-                    return
+                    return {"status": "ok"}  # 无法获取成员信息，允许继续
         except (ValueError, TypeError):
-            return
+            return {"status": "ok"}  # 用户ID无效，允许继续
 
         if member is None or not hasattr(member, "roles"):
-            return
+            return {"status": "ok"}  # 无法获取角色信息，允许继续
 
         # 获取用户真实身份组ID列表（排除 @everyone）
         real_role_ids = []
@@ -1580,41 +1631,44 @@ class NovelAIPlugin(Star):
             if role and role.id != guild.id:  # 排除 @everyone
                 real_role_ids.append(str(role.id))
 
+        # ① 检查用户是否有身份组
+        if not real_role_ids:
+            return {"status": "no_roles", "error": "请先获取身份组"}
+
+        # 重新加载 access_control 以确保数据是最新的
+        access_control.reload()
+
         # 获取白名单中记录的用户信息
         async with access_control._lock:
             user_quota = access_control._get_user(user_id)
 
-        if not user_quota:
-            return
+        # ② 检查白名单中是否有记录
+        if user_quota:
+            recorded_role_ids = user_quota.identity_groups
+            
+            # 如果身份组匹配，允许继续
+            if recorded_role_ids is not None and set(real_role_ids) == set(recorded_role_ids):
+                return {"status": "ok"}
+            
+            # 如果身份组不匹配，需要更新
+            # 计算应该的使用上限（只考虑在 role.json 中的身份组）
+            expected_daily_limit = 3  # 默认值
+            expected_refresh_interval = 1440  # 默认值
+            max_daily_limit = 3  # 用于记录最高使用上限
+            has_role_in_config = False
 
-        recorded_role_ids = user_quota.identity_groups or []
-        recorded_daily_limit = user_quota.daily_limit
+            for role_id in real_role_ids:
+                role_info = role_config.get("roles", {}).get(role_id)
+                if role_info:
+                    has_role_in_config = True
+                    role_daily_limit = role_info.get("default_daily_limit", 3)
+                    role_refresh_interval = role_info.get("refresh_interval_minutes", 1440)
+                    # 如果这个身份组的使用上限更高，则使用这个身份组的配置
+                    if role_daily_limit > max_daily_limit:
+                        max_daily_limit = role_daily_limit
+                        expected_daily_limit = role_daily_limit
+                        expected_refresh_interval = role_refresh_interval
 
-        # 根据真实身份组计算应该的使用上限
-        # 遍历所有身份组，找到使用上限最高的身份组配置
-        expected_daily_limit = 3  # 默认值
-        expected_refresh_interval = 1440  # 默认值
-        max_daily_limit = 3  # 用于记录最高使用上限
-
-        for role_id in real_role_ids:
-            role_info = role_config.get("roles", {}).get(role_id)
-            if role_info:
-                role_daily_limit = role_info.get("default_daily_limit", 3)
-                role_refresh_interval = role_info.get("refresh_interval_minutes", 1440)
-                # 如果这个身份组的使用上限更高，则使用这个身份组的配置
-                if role_daily_limit > max_daily_limit:
-                    max_daily_limit = role_daily_limit
-                    expected_daily_limit = role_daily_limit
-                    expected_refresh_interval = role_refresh_interval
-
-        # 检查是否需要更新：身份组不匹配 或 使用上限不匹配
-        needs_update = False
-        if set(real_role_ids) != set(recorded_role_ids):
-            needs_update = True
-        elif recorded_daily_limit != expected_daily_limit:
-            needs_update = True
-
-        if needs_update:
             # 更新用户信息
             await access_control.set_quota(
                 user_id,
@@ -1630,7 +1684,45 @@ class NovelAIPlugin(Star):
                     user_quota.remaining = expected_daily_limit
                     access_control._set_user(user_quota)
                     access_control._save_locked()
-            logger.info(f"已更新用户 {user_id} 的身份组信息和使用上限")
+            logger.info(f"已更新用户 {user_id} 的身份组信息和使用上限（身份组: {real_role_ids}, 使用上限: {expected_daily_limit}）")
+            
+            # 更新后需要重新检查
+            return {"status": "needs_recheck"}
+        else:
+            # ③ 用户不在白名单中，检查身份组是否在 role.json 中
+            has_role_in_config = False
+            expected_daily_limit = 3  # 默认值
+            expected_refresh_interval = 1440  # 默认值
+            max_daily_limit = 3  # 用于记录最高使用上限
+
+            for role_id in real_role_ids:
+                role_info = role_config.get("roles", {}).get(role_id)
+                if role_info:
+                    has_role_in_config = True
+                    role_daily_limit = role_info.get("default_daily_limit", 3)
+                    role_refresh_interval = role_info.get("refresh_interval_minutes", 1440)
+                    # 如果这个身份组的使用上限更高，则使用这个身份组的配置
+                    if role_daily_limit > max_daily_limit:
+                        max_daily_limit = role_daily_limit
+                        expected_daily_limit = role_daily_limit
+                        expected_refresh_interval = role_refresh_interval
+
+            # ④ 如果部分身份组在 role.json 中，允许生图（使用 role.json 中的最高上限）
+            if has_role_in_config:
+                # 添加到白名单
+                await access_control.set_quota(
+                    user_id,
+                    expected_daily_limit,
+                    nickname=member.display_name or member.name,
+                    identity_groups=real_role_ids if real_role_ids else None,
+                    refresh_interval_minutes=expected_refresh_interval,
+                )
+                access_control.reload()  # 重新加载以确保数据是最新的
+                logger.info(f"已将用户 {user_id} 添加到白名单（身份组: {real_role_ids}, 使用上限: {expected_daily_limit}）")
+                return {"status": "ok"}
+            else:
+                # 所有身份组都不在 role.json 中，拒绝
+                return {"status": "not_in_role_config", "error": "你的身份组不在白名单内，请联系管理员"}
 
     async def _ensure_role_json(self, role_json_path: Path, guild) -> Dict[str, Any]:
         """确保 role.json 存在，如果不存在则创建并写入所有身份组。"""
